@@ -1,0 +1,8 @@
+name = "IssueReview"
+uuid = "72f62ef5-9d62-4f25-b30c-f43aa0c4757d"
+version = "0.1.0"
+
+[deps]
+
+[compat]
+julia = "1.10"
