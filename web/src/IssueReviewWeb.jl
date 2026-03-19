@@ -730,15 +730,18 @@ end
                     });
                 }
                 highlightDiffs();
-                document.body.addEventListener('htmx:afterSettle', function() {
+                document.body.addEventListener('htmx:afterSettle', function(evt) {
                     highlightDiffs();
-                    // Flash cards that were just updated
-                    document.querySelectorAll('.proposal-card').forEach(function(card) {
-                        card.classList.add('just-updated');
-                        card.addEventListener('animationend', function() {
-                            card.classList.remove('just-updated');
-                        }, {once: true});
-                    });
+                    // Only flash after user actions (POST), not background polling (GET)
+                    var verb = evt.detail && evt.detail.requestConfig && evt.detail.requestConfig.verb;
+                    if (verb === 'post') {
+                        document.querySelectorAll('.proposal-card').forEach(function(card) {
+                            card.classList.add('just-updated');
+                            card.addEventListener('animationend', function() {
+                                card.classList.remove('just-updated');
+                            }, {once: true});
+                        });
+                    }
                 });
                 document.body.addEventListener('toggle', function(e) {
                     if (e.target.open) setTimeout(highlightDiffs, 10);
