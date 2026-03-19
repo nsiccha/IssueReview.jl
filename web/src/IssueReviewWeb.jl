@@ -565,27 +565,21 @@ end
             cls = isempty(style) ? "" : "btn-$style"
             base_url = "/respond/$slug/$new_status"
             # hx-vals sends JSON as form data (works with POST kwargs)
-            vals = isempty(cmt) ? nothing : """{"msg": $(JSON.json(cmt))}"""
+            # Always include hx-vals to ensure a request body exists (Oxygen crashes on empty POST body)
+            vals = """{"msg": $(JSON.json(cmt))}"""
             btn_attrs = if prompt
                 # "prompt" buttons: hx-include grabs the text input (name=msg) as formdata
                 (; class="btn $cls", hx_post=base_url,
                     hx_target="#proposals-list", hx_swap="innerHTML",
                     hx_include="#comment-input-$slug")
-            elseif !isnothing(vals) && confirm
-                (; class="btn $cls", hx_post=base_url,
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    hx_vals=vals, hx_confirm="$label this proposal?")
-            elseif !isnothing(vals)
-                (; class="btn $cls", hx_post=base_url,
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    hx_vals=vals)
             elseif confirm
                 (; class="btn $cls", hx_post=base_url,
                     hx_target="#proposals-list", hx_swap="innerHTML",
-                    hx_confirm="$label this proposal?")
+                    hx_vals=vals, hx_confirm="$label this proposal?")
             else
                 (; class="btn $cls", hx_post=base_url,
-                    hx_target="#proposals-list", hx_swap="innerHTML")
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    hx_vals=vals)
             end
             h.button(; btn_attrs...)(label)
         end
