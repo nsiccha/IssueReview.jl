@@ -639,9 +639,18 @@ end
             )
         else
             pass = result.exit_code == 0
+            # Extract timestamp from .out file
+            ts = ""
+            if isfile(out_path)
+                for line in eachline(out_path)
+                    m = match(r"^# finished: (.+)", line)
+                    !isnothing(m) && (ts = m.captures[1]; break)
+                end
+            end
+            ts_label = isempty(ts) ? "" : " ($ts)"
             h.div(class="mwe-panel")(
                 h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
-                    "$label — $(pass ? "PASS (exit 0)" : "FAIL (exit $(result.exit_code))")"
+                    "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label"
                 ),
                 h.pre(_html_escape(result.output)),
             )
@@ -661,9 +670,17 @@ end
         else
             # Done — return final panel (no more polling)
             pass = result.exit_code == 0
+            ts = ""
+            if isfile(out_path)
+                for line in eachline(out_path)
+                    m = match(r"^# finished: (.+)", line)
+                    !isnothing(m) && (ts = m.captures[1]; break)
+                end
+            end
+            ts_label = isempty(ts) ? "" : " ($ts)"
             h.div(class="mwe-panel")(
                 h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
-                    "$label — $(pass ? "PASS (exit 0)" : "FAIL (exit $(result.exit_code))")"
+                    "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label"
                 ),
                 h.pre(_html_escape(result.output)),
             )
