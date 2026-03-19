@@ -744,10 +744,18 @@ end
                 "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
                 h.strong("Never merge — "), "only Niko merges after reviewing the PR on GitHub.",
             ),
-            h.div(; id="proposals-list")(_render_list[filter]...),
+            h.div(; id="proposals-list",
+                hx_get=query_url("/"; filter),
+                hx_trigger="every 5s",
+                hx_swap="innerHTML",
+            )(_render_list[filter]...),
         )
         if is_htmx(req)
-            h.div(; id="proposals-list")(_render_list[filter]...) |> to_response
+            h.div(; id="proposals-list",
+                hx_get=query_url("/"; filter),
+                hx_trigger="every 5s",
+                hx_swap="innerHTML",
+            )(_render_list[filter]...) |> to_response
         else
             _page[content] |> to_response
         end
