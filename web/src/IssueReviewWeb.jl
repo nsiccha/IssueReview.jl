@@ -674,14 +674,14 @@ end
                 h.code(; class="language-julia")(_html_escape(read(script, String))),
             ),
             has_results ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
-                !isnothing(main_dir) ? _render_mwe_panel["main", main_result, script, main_dir] : "",
-                _render_mwe_panel["worktree", worktree_result, script, worktree],
+                !isnothing(main_dir) ? _render_mwe_panel("main", main_result, script, main_dir) : "",
+                _render_mwe_panel("worktree", worktree_result, script, worktree),
             ) : "",
         )
     end
 
     _render_mwe(slug, worktree) = begin
-        scripts = _find_mwe_scripts[slug]
+        scripts = _find_mwe_scripts(slug)
         isempty(scripts) && return ""
         main_dir = _repo_main_dir(worktree)
         any_results = any(scripts) do s
@@ -693,7 +693,7 @@ end
         mwe_details = any_results ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
         mwe_details(
             h.summary("MWE ($(length(scripts)) script$(length(scripts) == 1 ? "" : "s"))"),
-            [_render_single_mwe[s, worktree, main_dir] for s in scripts]...,
+            [_render_single_mwe(s, worktree, main_dir) for s in scripts]...,
             # Run all button
             !any_results && length(scripts) > 1 ? h.form(;
                 hx_post=query_url("/run_all_mwe"; slug, worktree),
@@ -705,34 +705,28 @@ end
         )
     end
 
-    _trigger_mwe(script, worktree; force=false) = begin
-        main_dir = _repo_main_dir(worktree)
-        if force
-            # Clear cached results to force re-run
-            !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
-            !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        else
-            !isnothing(main_dir) && _mwe_result(script, main_dir)
-            !isempty(worktree) && _mwe_result(script, worktree)
-        end
-    end
-
     @post run_mwe(; script="", worktree="") = begin
-        _trigger_mwe[script, worktree]
-        _render_list["all"] |> to_response
+        main_dir = _repo_main_dir(worktree)
+        !isnothing(main_dir) && _mwe_result(script, main_dir)
+        !isempty(worktree) && _mwe_result(script, worktree)
+        _render_list("all") |> to_response
     end
 
     @post rerun_mwe(; script="", worktree="") = begin
-        _trigger_mwe[script, worktree; force=true]
-        _render_list["all"] |> to_response
+        main_dir = _repo_main_dir(worktree)
+        !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        _render_list("all") |> to_response
     end
 
     @post run_all_mwe(; slug="", worktree="") = begin
-        scripts = _find_mwe_scripts[slug]
+        scripts = _find_mwe_scripts(slug)
         for s in scripts
-            _trigger_mwe[s, worktree]
+            main_dir = _repo_main_dir(worktree)
+            !isnothing(main_dir) && _mwe_result(s, main_dir)
+            !isempty(worktree) && _mwe_result(s, worktree)
         end
-        _render_list["all"] |> to_response
+        _render_list("all") |> to_response
     end
 
     @get mwe_output(; script="", dir="", label="") = begin
@@ -897,12 +891,12 @@ end
             ),
             # Right column — issue discussion
             h.div(class="card-right")(
-                !isempty(issue) ? _render_discussion[issue] : "",
+                !isempty(issue) ? _render_discussion(issue) : "",
             ),
             # Footer — diff spans full width
             !isempty(worktree) ? h.div(class="card-footer")(
-                _render_mwe[slug, worktree],
-                _render_diff[worktree],
+                _render_mwe(slug, worktree),
+                _render_diff(worktree),
             ) : "",
         )
     end
@@ -930,7 +924,7 @@ end
         vcat(
             [h.div(class="filter-bar")(filter_links_list...)],
             isempty(ps) ? [h.p("No proposals with status: $filter_val")] :
-                [_render_proposal[p] for p in ps],
+                [_render_proposal(p) for p in ps],
         )
     end
 
@@ -1010,7 +1004,7 @@ end
                 "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
                 h.strong("Never merge — "), "only Niko merges after reviewing the PR on GitHub.",
             ),
-            h.div(; id="proposals-list")(_render_list[filter]...),
+            h.div(; id="proposals-list")(_render_list(filter)...),
             # Poll for file changes; show banner when updates available
             h.div(; id="poll-sentinel",
                 hx_get=query_url("/proposals_hash"; current_hash=_proposals_hash),
@@ -1021,9 +1015,9 @@ end
             )(),
         )
         if is_htmx(req)
-            h.div(; id="proposals-list")(_render_list[filter]...) |> to_response
+            h.div(; id="proposals-list")(_render_list(filter)...) |> to_response
         else
-            _page[content] |> to_response
+            _page(content) |> to_response
         end
     end
 
@@ -1092,7 +1086,7 @@ end
         if is_htmx(req)
             content |> to_response
         else
-            _page[h.div(class="container")(content)] |> to_response
+            _page(h.div(class="container")(content)) |> to_response
         end
     end
 
@@ -1120,16 +1114,16 @@ end
         isfile(path) || return to_response(h.p("Not found: $slug"))
         update_yaml!(path, "status", new_status)
         !isempty(msg) && add_comment!(path, msg)
-        _render_list["all"] |> to_response
+        _render_list("all") |> to_response
     end
 
-    @post respond(slug, new_status; msg="") = _do_respond[slug, new_status, msg]
+    @post respond(slug, new_status; msg="") = _do_respond(slug, new_status, msg)
 
     @post add_comment(slug; msg="") = begin
         path = joinpath(proposals_dir(), "$slug.md")
         isfile(path) || return to_response(h.p("Not found: $slug"))
         !isempty(msg) && add_comment!(path, msg)
-        _render_list["all"] |> to_response
+        _render_list("all") |> to_response
     end
 end
 
