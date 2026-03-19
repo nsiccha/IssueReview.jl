@@ -112,21 +112,29 @@ function _run_mwe(script_path, run_dir)
 end
 
 function _run_mwe_safe(script_path, run_dir)
-    # Capture output even on failure
     isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
     out_file = tempname()
     try
-        cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
+        # Instantiate deps first (worktrees may not have been resolved yet)
         open(out_file, "w") do f
+            inst = setenv(`julia --project=$run_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
+            inst_proc = run(pipeline(inst; stdout=f, stderr=f); wait=false)
+            wait(inst_proc)
+            if inst_proc.exitcode != 0
+                return (; exit_code=inst_proc.exitcode, output="Pkg.instantiate() failed:\n" * read(out_file, String))
+            end
+        end
+        # Run the actual script
+        open(out_file, "w") do f
+            cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
             proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
             wait(proc)
             return (; exit_code=proc.exitcode, output=read(out_file, String))
         end
     catch e
         output = isfile(out_file) ? read(out_file, String) : ""
-        code = e isa ProcessFailedException ? -1 : -1
-        (; exit_code=code, output=isempty(output) ? "Error: $(sprint(showerror, e))" : output)
+        (; exit_code=-1, output=isempty(output) ? "Error: $(sprint(showerror, e))" : output)
     finally
         rm(out_file; force=true)
     end
