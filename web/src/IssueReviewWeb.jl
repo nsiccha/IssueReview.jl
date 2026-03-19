@@ -114,32 +114,50 @@ end
 function _run_mwe_safe(script_path, run_dir)
     isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
-    out_file = tempname()
+    # Stream output directly to the stable .out file so the UI can poll it live
+    out_path = _mwe_output_path(script_path, run_dir)
+    label = _is_main_dir(run_dir) ? "main" : "worktree"
+    mkpath(dirname(out_path))
     result = try
-        # Instantiate deps first (worktrees may not have been resolved yet)
-        open(out_file, "w") do f
+        open(out_path, "w") do f
+            println(f, "# MWE: $(basename(script_path)) on $label")
+            println(f, "# started: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+            println(f, "# dir: $run_dir")
+            println(f, "---")
+            flush(f)
+            # Instantiate
+            println(f, "==> Pkg.instantiate()")
+            flush(f)
             inst = setenv(`julia --project=$run_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
             inst_proc = run(pipeline(inst; stdout=f, stderr=f); wait=false)
             wait(inst_proc)
+            flush(f)
             if inst_proc.exitcode != 0
-                return (; exit_code=inst_proc.exitcode, output="Pkg.instantiate() failed:\n" * read(out_file, String))
+                println(f, "\n# exit_code: $(inst_proc.exitcode)")
+                println(f, "# status: FAIL (instantiate)")
+                return (; exit_code=inst_proc.exitcode, output=read(out_path, String))
             end
-        end
-        # Run the actual script
-        open(out_file, "w") do f
+            # Run script
+            println(f, "==> Running $(basename(script_path))")
+            flush(f)
             cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
             proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
             wait(proc)
-            return (; exit_code=proc.exitcode, output=read(out_file, String))
+            flush(f)
+            println(f, "\n# exit_code: $(proc.exitcode)")
+            println(f, "# status: $(proc.exitcode == 0 ? "PASS" : "FAIL")")
+            println(f, "# finished: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+            (; exit_code=proc.exitcode, output=read(out_path, String))
         end
     catch e
-        output = isfile(out_file) ? read(out_file, String) : ""
+        output = isfile(out_path) ? read(out_path, String) : ""
+        open(out_path, "a") do f
+            println(f, "\n# exit_code: -1")
+            println(f, "# status: ERROR")
+            println(f, "# error: $(sprint(showerror, e))")
+        end
         (; exit_code=-1, output=isempty(output) ? "Error: $(sprint(showerror, e))" : output)
-    finally
-        rm(out_file; force=true)
     end
-    # Write output to disk so the agent can read it
-    _save_mwe_output(script_path, run_dir, result)
     result
 end
 
@@ -155,19 +173,6 @@ function _is_main_dir(run_dir)
     !contains(run_dir, "worktree")
 end
 
-function _save_mwe_output(script_path, run_dir, result)
-    path = _mwe_output_path(script_path, run_dir)
-    label = _is_main_dir(run_dir) ? "main" : "worktree"
-    open(path, "w") do io
-        println(io, "# MWE output: $(basename(script_path)) on $label")
-        println(io, "# dir: $run_dir")
-        println(io, "# exit_code: $(result.exit_code)")
-        println(io, "# status: $(result.exit_code == 0 ? "PASS" : "FAIL")")
-        println(io, "# timestamp: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
-        println(io, "---")
-        print(io, result.output)
-    end
-end
 
 # Find the repo root for a worktree (to run the MWE on main)
 function _repo_main_dir(worktree_path)
@@ -622,14 +627,39 @@ end
     end
 
     _render_mwe_panel(label, result, script_path, run_dir) = begin
+        out_path = _mwe_output_path(script_path, run_dir)
         if isnothing(result)
+            # Task running — stream from the .out file
+            live_output = isfile(out_path) ? read(out_path, String) : ""
             h.div(class="mwe-panel")(
                 h.div(class="mwe-panel-header mwe-loading")("$label — running..."),
-                h.pre(; hx_get=query_url("/mwe_output"; script=script_path, dir=run_dir, label),
-                    hx_trigger="every 3s", hx_swap="outerHTML",
-                )("Running MWE..."),
+                h.pre(; hx_get=query_url("/mwe_stream"; script=script_path, dir=run_dir, label),
+                    hx_trigger="every 2s", hx_swap="outerHTML",
+                )(_html_escape(isempty(live_output) ? "Starting..." : live_output)),
             )
         else
+            pass = result.exit_code == 0
+            h.div(class="mwe-panel")(
+                h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
+                    "$label — $(pass ? "PASS (exit 0)" : "FAIL (exit $(result.exit_code))")"
+                ),
+                h.pre(_html_escape(result.output)),
+            )
+        end
+    end
+
+    # Streaming endpoint: returns current .out file content or final result
+    @get mwe_stream(; script="", dir="", label="") = begin
+        result = _mwe_result(script, dir)
+        out_path = _mwe_output_path(script, dir)
+        if isnothing(result)
+            # Still running — return current file content with continued polling
+            live_output = isfile(out_path) ? read(out_path, String) : "Starting..."
+            h.pre(; hx_get=query_url("/mwe_stream"; script, dir, label),
+                hx_trigger="every 2s", hx_swap="outerHTML",
+            )(_html_escape(live_output))
+        else
+            # Done — return final panel (no more polling)
             pass = result.exit_code == 0
             h.div(class="mwe-panel")(
                 h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
@@ -651,19 +681,25 @@ end
         sname = basename(script)
         main_result = isnothing(main_dir) ? nothing : _mwe_result(script, main_dir)
         worktree_result = _mwe_result(script, worktree)
+        # Three states: idle (never run), running (result is nothing but triggered), done
+        main_out = _mwe_output_path(script, isnothing(main_dir) ? "" : main_dir)
+        wt_out = _mwe_output_path(script, worktree)
+        was_triggered = isfile(main_out) || isfile(wt_out)
         has_results = !isnothing(main_result) || !isnothing(worktree_result)
+        is_running = was_triggered && !has_results
+        show_panels = was_triggered || has_results
 
         btn_style = "font-size:0.75rem;padding:0.15rem 0.5rem"
         h.div(; style="margin-bottom:0.75rem")(
             h.div(; style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem")(
                 h.strong(; style="font-size:0.85rem")(sname),
-                !has_results ? h.form(; hx_post=query_url("/run_mwe"; script, worktree),
+                !show_panels ? h.form(; hx_post=query_url("/run_mwe"; script, worktree),
                     hx_target="#proposals-list", hx_swap="innerHTML",
                     style="display:inline",
                 )(
                     h.button(; class="btn btn-approve", type="submit", style=btn_style)("Run"),
                 ) : "",
-                has_results ? h.form(; hx_post=query_url("/rerun_mwe"; script, worktree),
+                show_panels ? h.form(; hx_post=query_url("/rerun_mwe"; script, worktree),
                     hx_target="#proposals-list", hx_swap="innerHTML",
                     style="display:inline",
                 )(
@@ -673,7 +709,7 @@ end
             h.pre(; style="font-size:0.75rem;background:#f6f8fa;padding:0.5rem;border-radius:4px;max-height:300px;overflow-y:auto;margin-top:0.3rem")(
                 h.code(; class="language-julia")(_html_escape(read(script, String))),
             ),
-            has_results ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
+            show_panels ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
                 !isnothing(main_dir) ? _render_mwe_panel("main", main_result, script, main_dir) : "",
                 _render_mwe_panel("worktree", worktree_result, script, worktree),
             ) : "",
@@ -714,6 +750,10 @@ end
 
     @post rerun_mwe(; script="", worktree="") = begin
         main_dir = _repo_main_dir(worktree)
+        # Clear old output files so streaming starts fresh
+        !isnothing(main_dir) && rm(_mwe_output_path(script, main_dir); force=true)
+        !isempty(worktree) && rm(_mwe_output_path(script, worktree); force=true)
+        # Force re-run
         !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
         !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
         _render_list("all") |> to_response
@@ -727,23 +767,6 @@ end
             !isempty(worktree) && _mwe_result(s, worktree)
         end
         _render_list("all") |> to_response
-    end
-
-    @get mwe_output(; script="", dir="", label="") = begin
-        result = _mwe_result(script, dir)
-        if isnothing(result)
-            h.pre(; hx_get=query_url("/mwe_output"; script, dir, label),
-                hx_trigger="every 3s", hx_swap="outerHTML",
-            )("Running MWE...")
-        else
-            pass = result.exit_code == 0
-            h.div(class="mwe-panel")(
-                h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
-                    "$label — $(pass ? "PASS (exit 0)" : "FAIL (exit $(result.exit_code))")"
-                ),
-                h.pre(_html_escape(result.output)),
-            )
-        end
     end
 
     _render_diff(worktree) = begin
@@ -957,16 +980,15 @@ end
             h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js")(),
             h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js")(),
             h.script("""
-                function highlightDiffs() {
-                    document.querySelectorAll('.diff-code:not([data-highlighted])').forEach(function(td) {
-                        td.dataset.highlighted = '1';
-                        var code = td.querySelector('code');
-                        if (code) Prism.highlightElement(code);
+                function highlightCode() {
+                    document.querySelectorAll('code[class*="language-"]:not([data-highlighted])').forEach(function(code) {
+                        code.dataset.highlighted = '1';
+                        Prism.highlightElement(code);
                     });
                 }
-                highlightDiffs();
+                highlightCode();
                 document.body.addEventListener('htmx:afterSettle', function(evt) {
-                    highlightDiffs();
+                    highlightCode();
                     // Only flash after user actions (POST), not background polling (GET)
                     var verb = evt.detail && evt.detail.requestConfig && evt.detail.requestConfig.verb;
                     if (verb === 'post') {
