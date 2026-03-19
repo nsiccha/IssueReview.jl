@@ -128,6 +128,7 @@ _default_quick_comments() = [
     Dict("msg"=>"Check if there's an existing PR for this.", "status"=>""),
     Dict("msg"=>"Not urgent, deprioritize.", "status"=>"skipped"),
     Dict("msg"=>"Add a docstring for the new export.", "status"=>"changes-requested"),
+    Dict("msg"=>"Missing MWE. Add a minimal example that fails on main but passes with your changes.", "status"=>"changes-requested"),
 ]
 
 function _config_path()
@@ -178,7 +179,7 @@ end
 function list_proposals()
     dir = proposals_dir()
     isdir(dir) || return []
-    files = [f for f in readdir(dir; join=true) if endswith(f, ".md")]
+    files = [f for f in readdir(dir; join=true) if endswith(f, ".md") && !startswith(basename(f), "_")]
     sort!(files; by=mtime, rev=true)
     [parse_proposal(f) for f in files]
 end
@@ -758,7 +759,10 @@ end
                 h.strong("Agent workflow: "),
                 "Write proposals to ", h.code(proposals_dir()), ". ",
                 "Each proposal must have a concise, accurate description of the proposed changes — this is what Niko reviews. ",
-                "Status lifecycle: ", h.code("pending → open-pr → pr-open → approved/changes-requested/rejected"), ". ",
+                h.br(),
+                h.strong("MWE required: "), "Every proposal must include a minimal working example (MWE) that fails on main but passes with the proposed changes. Include it in the proposal body. ",
+                h.br(),
+                h.strong("Status lifecycle: "), h.code("pending → open-pr → pr-open → approved/changes-requested/rejected"), ". ",
                 "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
                 h.strong("Never merge — "), "only Niko merges after reviewing the PR on GitHub.",
             ),
