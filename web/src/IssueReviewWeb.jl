@@ -421,8 +421,12 @@ end
     .btn-changes:hover { background: #b3831e; }
     .btn-skip { background: #666; color: white; border-color: #666; }
     .btn-skip:hover { background: #555; }
-    .btn-quick { background: white; border-color: #d0d7de; font-size: 0.8rem; color: #555; }
+    .btn-quick { background: white; border-color: #d0d7de; font-size: 0.8rem; color: #555; border-left: 3px solid #d0d7de; }
     .btn-quick:hover { background: #f0f0f0; color: #333; }
+    .btn-quick-changes { border-left-color: #d29922; }
+    .btn-quick-skip { border-left-color: #666; }
+    .btn-quick-approve { border-left-color: #2da44e; }
+    .btn-quick-reject { border-left-color: #cf222e; }
     .comment-form { display: flex; gap: 0.5rem; flex: 1; min-width: 300px; }
     .comment-form input { flex: 1; padding: 0.3rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; }
     .comment-form button { white-space: nowrap; }
@@ -597,26 +601,27 @@ end
 
         # Quick comment buttons
         quick_buttons = map(_quick_comments()) do qc
-            # Support both old string format and new dict format
             msg = qc isa AbstractDict ? get(qc, "msg", "") : string(qc)
             qstatus = qc isa AbstractDict ? get(qc, "status", "") : ""
-            if isempty(qstatus)
-                h.form(; hx_post="/add_comment/$slug",
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    style="display:inline",
-                )(
-                    h.input(; type="hidden", name="msg", value=msg),
-                    h.button(; class="btn btn-quick", type="submit")(msg),
-                )
+            color_cls = if contains(qstatus, "changes")
+                "btn-quick-changes"
+            elseif contains(qstatus, "skip")
+                "btn-quick-skip"
+            elseif contains(qstatus, "approve") || contains(qstatus, "open")
+                "btn-quick-approve"
+            elseif contains(qstatus, "reject")
+                "btn-quick-reject"
             else
-                h.form(; hx_post="/respond/$slug/$qstatus",
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    style="display:inline",
-                )(
-                    h.input(; type="hidden", name="msg", value=msg),
-                    h.button(; class="btn btn-quick", type="submit")(msg),
-                )
+                ""
             end
+            post_url = isempty(qstatus) ? "/add_comment/$slug" : "/respond/$slug/$qstatus"
+            h.form(; hx_post=post_url,
+                hx_target="#proposals-list", hx_swap="innerHTML",
+                style="display:inline",
+            )(
+                h.input(; type="hidden", name="msg", value=msg),
+                h.button(; class="btn btn-quick $color_cls", type="submit")(msg),
+            )
         end
 
         h.div(; class="proposal-card status-$status", id="proposal-$slug")(
