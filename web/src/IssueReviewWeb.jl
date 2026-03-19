@@ -603,19 +603,81 @@ end
         end
     end
 
-    _render_mwe(slug, worktree) = begin
-        script = joinpath(proposals_dir(), "$slug.jl")
-        isfile(script) || return ""
-        main_dir = _repo_main_dir(worktree)
-        main_result = isnothing(main_dir) ? (; exit_code=-1, output="(cannot find main repo)") : _mwe_result(script, main_dir)
+    _find_mwe_scripts(slug) = begin
+        dir = proposals_dir()
+        isdir(dir) || return String[]
+        # Match <slug>.jl, <slug>-foo.jl, <slug>_bar.jl etc.
+        [f for f in readdir(dir; join=true) if endswith(f, ".jl") && startswith(basename(f), slug)]
+    end
+
+    _render_single_mwe(script, worktree, main_dir) = begin
+        sname = basename(script)
+        main_result = isnothing(main_dir) ? nothing : _mwe_result(script, main_dir)
         worktree_result = _mwe_result(script, worktree)
-        h.details(class="mwe-section"; open="")(
-            h.summary("MWE Results"),
-            h.div(class="mwe-grid")(
-                _render_mwe_panel["main", main_result, script, something(main_dir, "")],
-                _render_mwe_panel["worktree", worktree_result, script, worktree],
+        has_results = !isnothing(main_result) || !isnothing(worktree_result)
+
+        h.div(; style="margin-bottom:0.75rem")(
+            h.div(; style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem")(
+                h.strong(; style="font-size:0.85rem")(sname),
+                !has_results ? h.form(; hx_post=query_url("/run_mwe"; script, worktree),
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    style="display:inline",
+                )(
+                    h.button(; class="btn btn-approve", type="submit", style="font-size:0.75rem;padding:0.15rem 0.5rem")("Run"),
+                ) : "",
             ),
+            h.details()(
+                h.summary(; style="font-size:0.8rem;color:#666;cursor:pointer")("View script"),
+                h.pre(; style="font-size:0.75rem;background:#f6f8fa;padding:0.5rem;border-radius:4px;max-height:200px;overflow-y:auto")(
+                    h.code(; class="language-julia")(_html_escape(read(script, String))),
+                ),
+            ),
+            has_results ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
+                !isnothing(main_dir) ? _render_mwe_panel["main", main_result, script, main_dir] : "",
+                _render_mwe_panel["worktree", worktree_result, script, worktree],
+            ) : "",
         )
+    end
+
+    _render_mwe(slug, worktree) = begin
+        scripts = _find_mwe_scripts[slug]
+        isempty(scripts) && return ""
+        main_dir = _repo_main_dir(worktree)
+        any_results = any(scripts) do s
+            r1 = isnothing(main_dir) ? nothing : _mwe_result(s, main_dir)
+            r2 = _mwe_result(s, worktree)
+            !isnothing(r1) || !isnothing(r2)
+        end
+
+        h.details(class="mwe-section"; any_results ? (; open="") : (;)...)(
+            h.summary("MWE ($(length(scripts)) script$(length(scripts) == 1 ? "" : "s"))"),
+            [_render_single_mwe[s, worktree, main_dir] for s in scripts]...,
+            # Run all button
+            !any_results && length(scripts) > 1 ? h.form(;
+                hx_post=query_url("/run_all_mwe"; slug, worktree),
+                hx_target="#proposals-list", hx_swap="innerHTML",
+                style="margin-top:0.5rem",
+            )(
+                h.button(; class="btn btn-approve", type="submit")("Run All"),
+            ) : "",
+        )
+    end
+
+    @post run_mwe(; script="", worktree="") = begin
+        main_dir = _repo_main_dir(worktree)
+        !isnothing(main_dir) && _mwe_result(script, main_dir)
+        !isempty(worktree) && _mwe_result(script, worktree)
+        _render_list["all"] |> to_response
+    end
+
+    @post run_all_mwe(; slug="", worktree="") = begin
+        scripts = _find_mwe_scripts[slug]
+        main_dir = _repo_main_dir(worktree)
+        for s in scripts
+            !isnothing(main_dir) && _mwe_result(s, main_dir)
+            !isempty(worktree) && _mwe_result(s, worktree)
+        end
+        _render_list["all"] |> to_response
     end
 
     @get mwe_output(; script="", dir="", label="") = begin
