@@ -750,10 +750,14 @@ end
 
     @post rerun_mwe(; script="", worktree="") = begin
         main_dir = _repo_main_dir(worktree)
-        # Clear old output files so streaming starts fresh
-        !isnothing(main_dir) && rm(_mwe_output_path(script, main_dir); force=true)
-        !isempty(worktree) && rm(_mwe_output_path(script, worktree); force=true)
-        # Force re-run
+        # Write "restarting" marker so the UI knows a rerun is in progress
+        for d in [main_dir, worktree]
+            isnothing(d) && continue
+            isempty(d) && continue
+            p = _mwe_output_path(script, d)
+            open(p, "w") do f; println(f, "# Restarting MWE..."); end
+        end
+        # Force re-run (clears cache, spawns new Tasks)
         !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
         !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
         _render_list("all") |> to_response
