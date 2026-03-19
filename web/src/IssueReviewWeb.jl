@@ -767,21 +767,20 @@ end
 
     @post rerun_mwe(; script="", worktree="") = begin
         main_dir = _repo_main_dir(worktree)
-        # Clear cache and write markers
+        # Write markers and clear cache, then trigger in background
         for d in [main_dir, worktree]
             isnothing(d) && continue
             isempty(d) && continue
-            DynamicObjects.maybepop!(_async_issues.mwe.cache, ((script, d), (;)))
             p = _mwe_output_path(script, d)
             open(p, "w") do f; println(f, "# Restarting MWE..."); end
         end
-        # Trigger in background — don't wait, don't re-render (let polling pick it up)
         Threads.@spawn begin
-            !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir) do rv, _; rv isa Task ? nothing : rv; end
-            !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree) do rv, _; rv isa Task ? nothing : rv; end
+            !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
+            !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
         end
-        # Return immediately with running state visible
-        _render_list("all") |> to_response
+        # Don't re-render list (old cache might still be visible).
+        # Return a script that triggers page refresh after a short delay.
+        hx_response(""; redirect="/")
     end
 
     @post run_all_mwe(; slug="", worktree="") = begin
