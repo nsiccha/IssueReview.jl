@@ -634,11 +634,8 @@ end
                     h.button(; class="btn btn-approve", type="submit", style="font-size:0.75rem;padding:0.15rem 0.5rem")("Run"),
                 ) : "",
             ),
-            h.details()(
-                h.summary(; style="font-size:0.8rem;color:#666;cursor:pointer")("View script"),
-                h.pre(; style="font-size:0.75rem;background:#f6f8fa;padding:0.5rem;border-radius:4px;max-height:200px;overflow-y:auto")(
-                    h.code(; class="language-julia")(_html_escape(read(script, String))),
-                ),
+            h.pre(; style="font-size:0.75rem;background:#f6f8fa;padding:0.5rem;border-radius:4px;max-height:300px;overflow-y:auto;margin-top:0.3rem")(
+                h.code(; class="language-julia")(_html_escape(read(script, String))),
             ),
             has_results ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
                 !isnothing(main_dir) ? _render_mwe_panel["main", main_result, script, main_dir] : "",
