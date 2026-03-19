@@ -744,20 +744,55 @@ end
                 "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
                 h.strong("Never merge — "), "only Niko merges after reviewing the PR on GitHub.",
             ),
-            h.div(; id="proposals-list",
-                hx_get=query_url("/"; filter),
+            h.div(; id="proposals-list")(_render_list[filter]...),
+            # Poll for file changes; show banner when updates available
+            h.div(; id="poll-sentinel",
+                hx_get=query_url("/proposals_hash"; current_hash=_proposals_hash),
                 hx_trigger="every 5s",
-                hx_swap="innerHTML",
-            )(_render_list[filter]...),
+                hx_swap="outerHTML",
+                data_hash=_proposals_hash,
+                style="display:none",
+            )(),
         )
         if is_htmx(req)
-            h.div(; id="proposals-list",
-                hx_get=query_url("/"; filter),
-                hx_trigger="every 5s",
-                hx_swap="innerHTML",
-            )(_render_list[filter]...) |> to_response
+            h.div(; id="proposals-list")(_render_list[filter]...) |> to_response
         else
             _page[content] |> to_response
+        end
+    end
+
+    _proposals_hash = begin
+        dir = proposals_dir()
+        files = isdir(dir) ? sort([f for f in readdir(dir; join=true) if endswith(f, ".md")]) : String[]
+        parts = [string(basename(f), ":", filesize(f), ":", mtime(f)) for f in files]
+        string(hash(join(parts, "|")))
+    end
+
+    @get proposals_hash(; current_hash="") = begin
+        new_hash = _proposals_hash
+        changed = !isempty(current_hash) && current_hash != new_hash
+        if changed
+            # Show update banner — clicking it refreshes the list
+            h.div(; id="poll-sentinel",
+                hx_get=query_url("/proposals_hash"; current_hash=new_hash),
+                hx_trigger="every 5s",
+                hx_swap="outerHTML", data_hash=new_hash,
+            )(
+                h.div(; id="update-banner",
+                    style="position:fixed;top:0;left:0;right:0;background:#0969da;color:white;padding:0.5rem 1rem;text-align:center;cursor:pointer;z-index:100;font-size:0.9rem;",
+                    hx_get=query_url("/"; filter="all"),
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    onclick="this.parentElement.style.display='none'",
+                )("Proposals updated — click to refresh"),
+            )
+        else
+            h.div(; id="poll-sentinel",
+                hx_get=query_url("/proposals_hash"; current_hash=new_hash),
+                hx_trigger="every 5s",
+                hx_swap="outerHTML",
+                data_hash=new_hash,
+                style="display:none",
+            )()
         end
     end
 
