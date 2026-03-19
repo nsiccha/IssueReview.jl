@@ -767,7 +767,6 @@ end
 
     @post rerun_mwe(; script="", worktree="") = begin
         main_dir = _repo_main_dir(worktree)
-        # Write markers and clear cache, then trigger in background
         for d in [main_dir, worktree]
             isnothing(d) && continue
             isempty(d) && continue
@@ -778,8 +777,6 @@ end
             !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
             !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
         end
-        # Don't re-render list (old cache might still be visible).
-        # Return a script that triggers page refresh after a short delay.
         hx_response(""; redirect="/")
     end
 
