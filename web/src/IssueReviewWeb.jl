@@ -115,7 +115,7 @@ function _run_mwe_safe(script_path, run_dir)
     isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
     out_file = tempname()
-    try
+    result = try
         # Instantiate deps first (worktrees may not have been resolved yet)
         open(out_file, "w") do f
             inst = setenv(`julia --project=$run_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
@@ -137,6 +137,35 @@ function _run_mwe_safe(script_path, run_dir)
         (; exit_code=-1, output=isempty(output) ? "Error: $(sprint(showerror, e))" : output)
     finally
         rm(out_file; force=true)
+    end
+    # Write output to disk so the agent can read it
+    _save_mwe_output(script_path, run_dir, result)
+    result
+end
+
+function _mwe_output_path(script_path, run_dir)
+    # e.g. proposals/411-rand-momentum-api.main.out or .worktree.out
+    slug = replace(basename(script_path), ".jl" => "")
+    label = _is_main_dir(run_dir) ? "main" : "worktree"
+    joinpath(dirname(script_path), "$slug.$label.out")
+end
+
+function _is_main_dir(run_dir)
+    # Heuristic: worktrees are under issues/worktrees/, main repos are not
+    !contains(run_dir, "worktree")
+end
+
+function _save_mwe_output(script_path, run_dir, result)
+    path = _mwe_output_path(script_path, run_dir)
+    label = _is_main_dir(run_dir) ? "main" : "worktree"
+    open(path, "w") do io
+        println(io, "# MWE output: $(basename(script_path)) on $label")
+        println(io, "# dir: $run_dir")
+        println(io, "# exit_code: $(result.exit_code)")
+        println(io, "# status: $(result.exit_code == 0 ? "PASS" : "FAIL")")
+        println(io, "# timestamp: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+        println(io, "---")
+        print(io, result.output)
     end
 end
 
@@ -624,6 +653,7 @@ end
         worktree_result = _mwe_result(script, worktree)
         has_results = !isnothing(main_result) || !isnothing(worktree_result)
 
+        btn_style = "font-size:0.75rem;padding:0.15rem 0.5rem"
         h.div(; style="margin-bottom:0.75rem")(
             h.div(; style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem")(
                 h.strong(; style="font-size:0.85rem")(sname),
@@ -631,7 +661,13 @@ end
                     hx_target="#proposals-list", hx_swap="innerHTML",
                     style="display:inline",
                 )(
-                    h.button(; class="btn btn-approve", type="submit", style="font-size:0.75rem;padding:0.15rem 0.5rem")("Run"),
+                    h.button(; class="btn btn-approve", type="submit", style=btn_style)("Run"),
+                ) : "",
+                has_results ? h.form(; hx_post=query_url("/rerun_mwe"; script, worktree),
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    style="display:inline",
+                )(
+                    h.button(; class="btn", type="submit", style=btn_style)("Rerun"),
                 ) : "",
             ),
             h.pre(; style="font-size:0.75rem;background:#f6f8fa;padding:0.5rem;border-radius:4px;max-height:300px;overflow-y:auto;margin-top:0.3rem")(
@@ -669,19 +705,32 @@ end
         )
     end
 
-    @post run_mwe(; script="", worktree="") = begin
+    _trigger_mwe(script, worktree; force=false) = begin
         main_dir = _repo_main_dir(worktree)
-        !isnothing(main_dir) && _mwe_result(script, main_dir)
-        !isempty(worktree) && _mwe_result(script, worktree)
+        if force
+            # Clear cached results to force re-run
+            !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
+            !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        else
+            !isnothing(main_dir) && _mwe_result(script, main_dir)
+            !isempty(worktree) && _mwe_result(script, worktree)
+        end
+    end
+
+    @post run_mwe(; script="", worktree="") = begin
+        _trigger_mwe[script, worktree]
+        _render_list["all"] |> to_response
+    end
+
+    @post rerun_mwe(; script="", worktree="") = begin
+        _trigger_mwe[script, worktree; force=true]
         _render_list["all"] |> to_response
     end
 
     @post run_all_mwe(; slug="", worktree="") = begin
         scripts = _find_mwe_scripts[slug]
-        main_dir = _repo_main_dir(worktree)
         for s in scripts
-            !isnothing(main_dir) && _mwe_result(s, main_dir)
-            !isempty(worktree) && _mwe_result(s, worktree)
+            _trigger_mwe[s, worktree]
         end
         _render_list["all"] |> to_response
     end
@@ -955,7 +1004,7 @@ end
                 "Write proposals to ", h.code(proposals_dir()), ". ",
                 "Each proposal must have a concise, accurate description of the proposed changes — this is what Niko reviews. ",
                 h.br(),
-                h.strong("MWE required: "), "Save a standalone Julia script as ", h.code("<slug>.jl"), " next to the proposal ", h.code("<slug>.md"), ". It must fail (non-zero exit) on main and pass (exit 0) with your changes. The web UI runs it automatically from both contexts. ",
+                h.strong("MWE required: "), "Save a standalone Julia script as ", h.code("<slug>.jl"), " next to the proposal ", h.code("<slug>.md"), " (multiple OK: ", h.code("<slug>-foo.jl"), "). Must fail (non-zero exit) on main, pass (exit 0) on worktree. Niko runs them via the web UI. Outputs are saved as ", h.code("<slug>.main.out"), " / ", h.code("<slug>.worktree.out"), " in the proposals dir. ",
                 h.br(),
                 h.strong("Status lifecycle: "), h.code("pending → open-pr → pr-open → approved/changes-requested/rejected"), ". ",
                 "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
