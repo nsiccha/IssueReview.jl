@@ -649,7 +649,8 @@ end
             !isnothing(r1) || !isnothing(r2)
         end
 
-        h.details(class="mwe-section"; any_results ? (; open="") : (;)...)(
+        mwe_details = any_results ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
+        mwe_details(
             h.summary("MWE ($(length(scripts)) script$(length(scripts) == 1 ? "" : "s"))"),
             [_render_single_mwe[s, worktree, main_dir] for s in scripts]...,
             # Run all button
