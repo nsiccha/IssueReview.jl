@@ -12,33 +12,74 @@ config_dir() = dirname(proposals_dir())
 # --- Async GitHub issue fetching ---
 
 function _fetch_issue_discussion(issue_url)
-    # Extract owner/repo and issue number from URL
     m = match(r"github\.com/([^/]+/[^/]+)/issues/(\d+)", issue_url)
-    isnothing(m) && return "(could not parse issue URL)"
+    isnothing(m) && return Dict("error" => "could not parse issue URL")
     repo_slug, issue_num = m.captures
     try
-        raw = strip(read(`gh issue view $issue_num --repo $repo_slug --json title,body,comments --comments`, String))
-        parsed = JSON.parse(raw)
-        parts = String[]
-        title = get(parsed, "title", "")
-        body = get(parsed, "body", "")
-        !isempty(title) && push!(parts, "## $title\n")
-        !isempty(body) && push!(parts, body)
-        comments = get(parsed, "comments", [])
-        if !isempty(comments)
-            push!(parts, "\n---\n### Comments ($(length(comments)))\n")
-            for c in comments
-                author = get(c, "author", Dict())
-                login = get(author, "login", "unknown")
-                created = get(c, "createdAt", "")
-                cbody = get(c, "body", "")
-                push!(parts, "**$login** ($created):\n$cbody\n")
-            end
-        end
-        join(parts, "\n")
+        raw = strip(read(`gh issue view $issue_num --repo $repo_slug --json title,body,comments,author,createdAt,labels --comments`, String))
+        JSON.parse(raw)
     catch e
-        "Error fetching issue: $(sprint(showerror, e))"
+        Dict("error" => "gh CLI failed: $(sprint(showerror, e))")
     end
+end
+
+function _format_gh_time(s)
+    isempty(s) && return ""
+    m = match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", s)
+    isnothing(m) ? s : "$(m.captures[1]) $(m.captures[2])"
+end
+
+function _render_issue_data(data)
+    # Handle legacy cached string format
+    data isa AbstractString && return h.div(class="markdown-body")(Markdown.html(Markdown.parse(data)))
+    data isa AbstractDict || return h.p(; style="color:#888")(string(data))
+    haskey(data, "error") && return h.p(; style="color:#c00;font-size:0.85rem")(data["error"])
+
+    title = get(data, "title", "")
+    body = get(data, "body", "")
+    author = get(get(data, "author", Dict()), "login", "")
+    created = _format_gh_time(get(data, "createdAt", ""))
+    labels = get(data, "labels", [])
+    comments = get(data, "comments", [])
+
+    label_nodes = [h.span(; style="display:inline-block;padding:0.1em 0.4em;border-radius:10px;background:#$(get(l,"color","ddd"));color:#$(get(l,"color","ddd") in ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04") ? "24292f" : "fff");font-size:0.75rem;margin-right:0.3rem")(
+        get(l, "name", "")
+    ) for l in labels]
+
+    nodes = []
+
+    # Issue header
+    push!(nodes, h.div(class="disc-header")(
+        h.div(class="disc-title")(title),
+        !isempty(label_nodes) ? h.div(; style="margin-top:0.3rem")(label_nodes...) : "",
+    ))
+
+    # Issue body (OP)
+    if !isempty(body)
+        push!(nodes, h.div(class="disc-comment")(
+            h.div(class="disc-comment-header")(
+                h.strong(author),
+                h.span(class="disc-time")(created),
+            ),
+            h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(body))),
+        ))
+    end
+
+    # Comments
+    for c in comments
+        cauthor = get(get(c, "author", Dict()), "login", "unknown")
+        ccreated = _format_gh_time(get(c, "createdAt", ""))
+        cbody = get(c, "body", "")
+        push!(nodes, h.div(class="disc-comment")(
+            h.div(class="disc-comment-header")(
+                h.strong(cauthor),
+                h.span(class="disc-time")(ccreated),
+            ),
+            h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(cbody))),
+        ))
+    end
+
+    h.div()(nodes...)
 end
 
 function _fetch_worktree_diff(worktree_path)
@@ -73,7 +114,7 @@ end
 # --- Responses config (editable via web UI) ---
 
 _default_responses() = [
-    Dict("label"=>"Open PR", "status"=>"open-pr", "comment"=>"LGTM. Open a PR for this — do NOT merge, I'll review the PR separately.", "style"=>"approve", "confirm"=>false, "prompt"=>false),
+    Dict("label"=>"Open PR", "status"=>"open-pr", "comment"=>"LGTM. Open a draft PR (gh pr create --draft). Do NOT merge — I'll review the PR separately on GitHub.", "style"=>"approve", "confirm"=>false, "prompt"=>false),
     Dict("label"=>"Open PR + note", "status"=>"open-pr", "comment"=>"", "style"=>"approve", "confirm"=>false, "prompt"=>true),
     Dict("label"=>"Revise", "status"=>"changes-requested", "comment"=>"", "style"=>"changes", "confirm"=>false, "prompt"=>true),
     Dict("label"=>"Reject", "status"=>"rejected", "comment"=>"Rejected — not worth pursuing.", "style"=>"reject", "confirm"=>true, "prompt"=>false),
@@ -225,16 +266,122 @@ function status_badge(status)
     h.span(; style="display:inline-block;padding:0.15em 0.5em;border-radius:3px;background:$color;color:white;font-size:0.8em;font-weight:600")(status)
 end
 
+function _html_escape(s)
+    replace(s, "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
+end
+
+function _prism_lang(filename)
+    ext = splitext(filename)[2]
+    ext == ".jl" ? "julia" :
+    ext == ".toml" ? "toml" :
+    ext == ".md" ? "markdown" :
+    ext == ".yml" || ext == ".yaml" ? "yaml" :
+    ext == ".json" ? "json" :
+    ext == ".sh" ? "bash" :
+    ext == ".py" ? "python" :
+    ext == ".js" ? "javascript" :
+    ext == ".ts" ? "typescript" :
+    ext == ".html" ? "html" :
+    ext == ".css" ? "css" :
+    "none"
+end
+
+function _diff_code_cell(text, lang)
+    lang == "none" ?
+        h.td(class="diff-code")(_html_escape(text)) :
+        h.td(class="diff-code")(h.code(; class="language-$lang")(_html_escape(text)))
+end
+
+function render_diff_html(diff_text)
+    startswith(diff_text, "(") && return h.p(; style="color:#888;font-size:0.85rem")(diff_text)
+    lines = split(diff_text, '\n')
+    files = []  # Vector of (filename, lang, rows)
+    current_file = ""
+    current_lang = "none"
+    current_rows = []
+    old_ln = 0
+    new_ln = 0
+
+    for line in lines
+        if startswith(line, "diff --git")
+            if !isempty(current_file)
+                push!(files, (current_file, current_lang, copy(current_rows)))
+            end
+            m = match(r"b/(.+)$", line)
+            current_file = isnothing(m) ? line : m.captures[1]
+            current_lang = _prism_lang(current_file)
+            current_rows = []
+            old_ln = 0; new_ln = 0
+        elseif startswith(line, "@@")
+            m = match(r"@@ -(\d+)", line)
+            if !isnothing(m)
+                old_ln = parse(Int, m.captures[1]) - 1
+                nm = match(r"\+(\d+)", line)
+                new_ln = isnothing(nm) ? old_ln : parse(Int, nm.captures[1]) - 1
+            end
+            push!(current_rows, h.tr(class="diff-hunk")(
+                h.td(; class="diff-ln", colspan="2")("..."),
+                h.td(; class="diff-sign")(),
+                h.td(class="diff-code")(_html_escape(line)),
+            ))
+        elseif startswith(line, "---") || startswith(line, "+++") ||
+               startswith(line, "index ") || startswith(line, "new file") ||
+               startswith(line, "old mode") || startswith(line, "new mode") ||
+               startswith(line, "deleted file")
+            # Skip diff metadata lines
+        elseif startswith(line, "+")
+            new_ln += 1
+            push!(current_rows, h.tr(class="diff-add")(
+                h.td(class="diff-ln")(""),
+                h.td(class="diff-ln")("$new_ln"),
+                h.td(class="diff-sign")("+"),
+                _diff_code_cell(line[2:end], current_lang),
+            ))
+        elseif startswith(line, "-")
+            old_ln += 1
+            push!(current_rows, h.tr(class="diff-del")(
+                h.td(class="diff-ln")("$old_ln"),
+                h.td(class="diff-ln")(""),
+                h.td(class="diff-sign")("-"),
+                _diff_code_cell(line[2:end], current_lang),
+            ))
+        elseif !isempty(current_file)
+            old_ln += 1; new_ln += 1
+            push!(current_rows, h.tr(class="diff-ctx")(
+                h.td(class="diff-ln")("$old_ln"),
+                h.td(class="diff-ln")("$new_ln"),
+                h.td(class="diff-sign")(),
+                _diff_code_cell(startswith(line, " ") ? line[2:end] : line, current_lang),
+            ))
+        end
+    end
+    !isempty(current_file) && push!(files, (current_file, current_lang, current_rows))
+
+    isempty(files) && return h.p(; style="color:#888;font-size:0.85rem")("(empty diff)")
+
+    h.div()(
+        [h.div(class="diff-file")(
+            h.div(class="diff-file-header")(fname),
+            h.table(class="diff-table")(h.tbody(rows...)),
+        ) for (fname, _lang, rows) in files]...
+    )
+end
+
 @htmx struct AppContext
     req = nothing
 
     css = """
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: #f6f8fa; }
-    .container { max-width: 900px; margin: 0 auto; padding: 2rem; }
+    .container { max-width: 1600px; margin: 0 auto; padding: 2rem; }
     h1 { margin-bottom: 1.5rem; }
     h1 small { font-weight: 400; font-size: 0.6em; color: #666; }
-    .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; }
+    .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; gap: 0 1.5rem; }
+    .proposal-card .card-header { grid-column: 1 / -1; }
+    .proposal-card .card-left { min-width: 0; }
+    .proposal-card .card-right { min-width: 0; overflow-y: auto; max-height: 80vh; }
+    .proposal-card .card-footer { grid-column: 1 / -1; }
+    @media (max-width: 1000px) { .proposal-card { grid-template-columns: 1fr; } .proposal-card .card-right { max-height: none; } }
     .proposal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; }
     .proposal-title { font-size: 1.2rem; font-weight: 600; }
     .proposal-title a { color: #0969da; text-decoration: none; }
@@ -284,25 +431,47 @@ end
     .nav-links { margin-bottom: 1rem; }
     .nav-links a { font-size: 0.85rem; color: #0969da; text-decoration: none; margin-right: 1rem; }
     .nav-links a:hover { text-decoration: underline; }
-    .issue-discussion { margin-top: 0.75rem; padding: 0.75rem; background: #fafbfc; border: 1px solid #eee; border-radius: 4px; font-size: 0.85rem; max-height: 400px; overflow-y: auto; }
-    .issue-discussion .markdown-body h2 { font-size: 1rem; margin: 0.5rem 0 0.3rem; }
-    .issue-discussion .markdown-body h3 { font-size: 0.95rem; margin: 0.5rem 0 0.3rem; }
-    .issue-discussion .markdown-body p { margin: 0.3rem 0; }
+    .issue-discussion { font-size: 0.85rem; }
     .issue-loading { color: #888; font-style: italic; font-size: 0.85rem; }
-    .diff-viewer { margin-top: 0.75rem; }
-    .diff-viewer summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #0969da; }
-    .diff-viewer pre { background: #1e1e1e; color: #d4d4d4; padding: 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.75rem; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; }
-    .diff-add { color: #3fb950; }
-    .diff-del { color: #f85149; }
-    .diff-hunk { color: #58a6ff; }
-    .diff-file { color: #d29922; font-weight: bold; }
+    .disc-header { margin-bottom: 0.75rem; }
+    .disc-title { font-size: 1.05rem; font-weight: 600; color: #24292f; }
+    .disc-comment { border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 0.5rem; overflow: hidden; }
+    .disc-comment-header { background: #f6f8fa; padding: 0.4rem 0.75rem; font-size: 0.8rem; border-bottom: 1px solid #d0d7de; display: flex; justify-content: space-between; align-items: center; }
+    .disc-comment-header strong { color: #24292f; }
+    .disc-time { color: #8b949e; font-size: 0.75rem; }
+    .disc-comment-body { padding: 0.5rem 0.75rem; }
+    .disc-comment-body.markdown-body { line-height: 1.5; }
+    .disc-comment-body.markdown-body p { margin: 0.3rem 0; }
+    .disc-comment-body.markdown-body h2 { font-size: 0.95rem; margin: 0.5rem 0 0.3rem; }
+    .disc-comment-body.markdown-body h3 { font-size: 0.9rem; margin: 0.4rem 0 0.2rem; }
+    .disc-comment-body.markdown-body pre { font-size: 0.8rem; padding: 0.5rem; }
+    .disc-comment-body.markdown-body ul, .disc-comment-body.markdown-body ol { margin: 0.3rem 0 0.3rem 1.5rem; }
+    .diff-viewer { margin-bottom: 0.75rem; }
+    .diff-viewer summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #0969da; padding: 0.3rem 0; }
+    .diff-file { border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 0.5rem; overflow: hidden; }
+    .diff-file-header { background: #f6f8fa; padding: 0.4rem 0.75rem; font-size: 0.8rem; font-weight: 600; font-family: monospace; border-bottom: 1px solid #d0d7de; color: #24292f; }
+    .diff-table { width: 100%; border-collapse: collapse; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.75rem; line-height: 1.4; table-layout: fixed; }
+    .diff-table td { padding: 0 0.5rem; vertical-align: top; white-space: pre-wrap; word-wrap: break-word; }
+    .diff-ln { width: 45px; min-width: 45px; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; }
+    .diff-sign { width: 16px; min-width: 16px; text-align: center; user-select: none; }
+    .diff-code { overflow-x: auto; }
+    .diff-add { background: #dafbe1; }
+    .diff-add .diff-ln { background: #ccffd8; color: #1a7f37; }
+    .diff-add .diff-sign { color: #1a7f37; }
+    .diff-del { background: #ffebe9; }
+    .diff-del .diff-ln { background: #ffd7d5; color: #cf222e; }
+    .diff-del .diff-sign { color: #cf222e; }
+    .diff-hunk { background: #ddf4ff; }
+    .diff-hunk td { color: #0969da; font-weight: 600; padding-top: 0.3rem; padding-bottom: 0.3rem; }
+    .diff-ctx { background: white; }
+    .diff-ctx .diff-ln { background: #fafbfc; }
     """
 
     proposals = list_proposals()
 
     _render_discussion(issue_url) = begin
-        disc = _issue_discussion(issue_url)
-        if isnothing(disc)
+        data = _issue_discussion(issue_url)
+        if isnothing(data)
             h.div(class="issue-discussion")(
                 h.span(; class="issue-loading",
                     hx_get=query_url("/issue_discussion"; url=issue_url),
@@ -311,26 +480,21 @@ end
                 )("Loading issue discussion..."),
             )
         else
-            h.div(class="issue-discussion")(
-                h.div(class="markdown-body")(Markdown.html(Markdown.parse(disc))),
-            )
+            h.div(class="issue-discussion")(_render_issue_data(data))
         end
     end
 
-    # GET /issue_discussion?url=... — returns just the discussion fragment (for HTMX polling)
     @get issue_discussion(; url="") = begin
         isempty(url) && return h.span()("No issue URL")
-        disc = _issue_discussion(url)
-        if isnothing(disc)
+        data = _issue_discussion(url)
+        if isnothing(data)
             h.span(; class="issue-loading",
                 hx_get=query_url("/issue_discussion"; url),
                 hx_trigger="every 2s",
                 hx_swap="outerHTML",
             )("Loading issue discussion...")
         else
-            h.div(class="issue-discussion")(
-                h.div(class="markdown-body")(Markdown.html(Markdown.parse(disc))),
-            )
+            h.div(class="issue-discussion")(_render_issue_data(data))
         end
     end
 
@@ -345,9 +509,10 @@ end
                 )("Loading diff..."),
             )
         else
+            nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
             h.details(class="diff-viewer")(
-                h.summary("Diff ($(count(==('\n'), diff_text)) lines)"),
-                h.pre(diff_text),
+                h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
+                render_diff_html(diff_text),
             )
         end
     end
@@ -362,9 +527,10 @@ end
                 hx_swap="outerHTML",
             )("Loading diff...")
         else
+            nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
             h.details(class="diff-viewer"; open="")(
-                h.summary("Diff ($(count(==('\n'), diff_text)) lines)"),
-                h.pre(diff_text),
+                h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
+                render_diff_html(diff_text),
             )
         end
     end
@@ -434,34 +600,43 @@ end
         end
 
         h.div(; class="proposal-card", id="proposal-$slug")(
-            h.div(class="proposal-header")(
-                h.div(class="proposal-title")(
-                    !isempty(issue) ? h.a(; href=issue, target="_blank")(fname) : fname
-                ),
-                status_badge(status),
-            ),
-            !isempty(meta_parts) ? h.div(class="proposal-meta")(meta_parts...) : "",
-            h.div(class="proposal-body")(body_html),
-            # Inline GitHub issue discussion (async)
-            !isempty(issue) ? _render_discussion[issue] : "",
-            !isempty(worktree) ? _render_diff[worktree] : "",
-            !isempty(comments) ? h.div(class="comments")(
-                h.strong("Comments:"),
-                [h.div(class="comment")(c) for c in comments]...,
-            ) : "",
-            h.div(class="actions")(
-                h.div(class="actions-row")(action_buttons...),
-                h.div(class="actions-row")(
-                    h.form(; class="comment-form",
-                        hx_post="/add_comment/$slug", hx_target="#proposals-list", hx_swap="innerHTML",
-                    )(
-                        h.input(; type="text", name="msg", id="comment-input-$slug",
-                            placeholder="Add a note..."),
-                        h.button(; class="btn", type="submit")("Comment"),
+            # Header — spans both columns
+            h.div(class="card-header")(
+                h.div(class="proposal-header")(
+                    h.div(class="proposal-title")(
+                        !isempty(issue) ? h.a(; href=issue, target="_blank")(fname) : fname
                     ),
+                    status_badge(status),
                 ),
-                h.div(class="actions-row")(quick_buttons...),
+                !isempty(meta_parts) ? h.div(class="proposal-meta")(meta_parts...) : "",
             ),
+            # Left column — summary + actions
+            h.div(class="card-left")(
+                h.div(class="proposal-body")(body_html),
+                !isempty(comments) ? h.div(class="comments")(
+                    h.strong("Comments:"),
+                    [h.div(class="comment")(c) for c in comments]...,
+                ) : "",
+                h.div(class="actions")(
+                    h.div(class="actions-row")(action_buttons...),
+                    h.div(class="actions-row")(
+                        h.form(; class="comment-form",
+                            hx_post="/add_comment/$slug", hx_target="#proposals-list", hx_swap="innerHTML",
+                        )(
+                            h.input(; type="text", name="msg", id="comment-input-$slug",
+                                placeholder="Add a note..."),
+                            h.button(; class="btn", type="submit")("Comment"),
+                        ),
+                    ),
+                    h.div(class="actions-row")(quick_buttons...),
+                ),
+            ),
+            # Right column — issue discussion
+            h.div(class="card-right")(
+                !isempty(issue) ? _render_discussion[issue] : "",
+            ),
+            # Footer — diff spans full width
+            !isempty(worktree) ? h.div(class="card-footer")(_render_diff[worktree]) : "",
         )
     end
 
@@ -492,38 +667,47 @@ end
         )
     end
 
-    diff_js = """
-    function colorizeDiffs() {
-        document.querySelectorAll('.diff-viewer pre').forEach(function(pre) {
-            if (pre.dataset.colorized) return;
-            pre.dataset.colorized = '1';
-            var html = pre.innerHTML;
-            pre.innerHTML = html.split('\\n').map(function(line) {
-                if (/^\\+[^+]/.test(line)) return '<span class="diff-add">' + line + '</span>';
-                if (/^-[^-]/.test(line)) return '<span class="diff-del">' + line + '</span>';
-                if (/^@@/.test(line)) return '<span class="diff-hunk">' + line + '</span>';
-                if (/^diff --git/.test(line)) return '<span class="diff-file">' + line + '</span>';
-                return line;
-            }).join('\\n');
-        });
-    }
-    colorizeDiffs();
-    document.body.addEventListener('htmx:afterSettle', colorizeDiffs);
-    // Also colorize when <details> is opened
-    document.body.addEventListener('toggle', function(e) {
-        if (e.target.open) colorizeDiffs();
-    }, true);
-    """
-
     _page(content_node) = htmx(
         h.head(
             h.meta(; charset="utf-8"),
             h.meta(; name="viewport", content="width=device-width, initial-scale=1"),
             h.style(css),
+            h.link(; rel="stylesheet", href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css"),
+            h.style("""
+                .diff-table code[class*="language-"] { background: none; padding: 0; font-size: inherit; }
+                .diff-add code[class*="language-"] { background: none; }
+                .diff-del code[class*="language-"] { background: none; }
+                .diff-table .token.comment { color: #6a737d; }
+                .diff-table .token.string { color: #032f62; }
+                .diff-table .token.keyword { color: #d73a49; }
+                .diff-table .token.function { color: #6f42c1; }
+                .diff-table .token.number { color: #005cc5; }
+                .diff-table .token.operator { color: #d73a49; }
+                .diff-table .token.punctuation { color: #24292e; }
+            """),
         ),
         h.body(
             h.div(class="container")(content_node),
-            h.script(diff_js),
+            h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js")(),
+            h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-julia.min.js")(),
+            h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-toml.min.js")(),
+            h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js")(),
+            h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js")(),
+            h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js")(),
+            h.script("""
+                function highlightDiffs() {
+                    document.querySelectorAll('.diff-code:not([data-highlighted])').forEach(function(td) {
+                        td.dataset.highlighted = '1';
+                        var code = td.querySelector('code');
+                        if (code) Prism.highlightElement(code);
+                    });
+                }
+                highlightDiffs();
+                document.body.addEventListener('htmx:afterSettle', highlightDiffs);
+                document.body.addEventListener('toggle', function(e) {
+                    if (e.target.open) setTimeout(highlightDiffs, 10);
+                }, true);
+            """),
         );
         htmx_version="2.0.8", hyperscript_version=nothing, pico_version=nothing,
     )
@@ -538,8 +722,9 @@ end
             h.div(class="agent-instructions")(
                 h.strong("Agent workflow: "),
                 "Write proposals to ", h.code(proposals_dir()), ". ",
+                "Each proposal must have a concise, accurate description of the proposed changes — this is what Niko reviews. ",
                 "Status lifecycle: ", h.code("pending → open-pr → pr-open → approved/changes-requested/rejected"), ". ",
-                "When status is ", h.code("open-pr"), ", open a PR and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
+                "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
                 h.strong("Never merge — "), "only Niko merges after reviewing the PR on GitHub.",
             ),
             h.div(; id="proposals-list")(_render_list[filter]...),
