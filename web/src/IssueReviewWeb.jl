@@ -123,11 +123,11 @@ _default_responses() = [
 ]
 
 _default_quick_comments() = [
-    "Looks good but needs tests.",
-    "Simplify — this can be a one-liner.",
-    "Check if there's an existing PR for this.",
-    "Not urgent, deprioritize.",
-    "Add a docstring for the new export.",
+    Dict("msg"=>"Looks good but needs tests.", "status"=>"changes-requested"),
+    Dict("msg"=>"Simplify — this can be a one-liner.", "status"=>"changes-requested"),
+    Dict("msg"=>"Check if there's an existing PR for this.", "status"=>""),
+    Dict("msg"=>"Not urgent, deprioritize.", "status"=>"skipped"),
+    Dict("msg"=>"Add a docstring for the new export.", "status"=>"changes-requested"),
 ]
 
 function _config_path()
@@ -597,13 +597,26 @@ end
 
         # Quick comment buttons
         quick_buttons = map(_quick_comments()) do qc
-            h.form(; hx_post="/add_comment/$slug",
-                hx_target="#proposals-list", hx_swap="innerHTML",
-                style="display:inline",
-            )(
-                h.input(; type="hidden", name="msg", value=qc),
-                h.button(; class="btn btn-quick", type="submit")(qc),
-            )
+            # Support both old string format and new dict format
+            msg = qc isa AbstractDict ? get(qc, "msg", "") : string(qc)
+            qstatus = qc isa AbstractDict ? get(qc, "status", "") : ""
+            if isempty(qstatus)
+                h.form(; hx_post="/add_comment/$slug",
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    style="display:inline",
+                )(
+                    h.input(; type="hidden", name="msg", value=msg),
+                    h.button(; class="btn btn-quick", type="submit")(msg),
+                )
+            else
+                h.form(; hx_post="/respond/$slug/$qstatus",
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    style="display:inline",
+                )(
+                    h.input(; type="hidden", name="msg", value=msg),
+                    h.button(; class="btn btn-quick", type="submit")(msg),
+                )
+            end
         end
 
         h.div(; class="proposal-card status-$status", id="proposal-$slug")(
