@@ -114,11 +114,11 @@ end
 # --- Responses config (editable via web UI) ---
 
 _default_responses() = [
-    Dict("label"=>"Open PR", "status"=>"open-pr", "comment"=>"LGTM. Open a draft PR (gh pr create --draft). Do NOT merge — I'll review the PR separately on GitHub.", "style"=>"approve", "confirm"=>false, "prompt"=>false),
+    Dict("label"=>"Open PR", "status"=>"open-pr", "comment"=>"APPROVED. Open a DRAFT PR (gh pr create --draft). Include a concise but accurate description of all changes in the PR body. Do NOT merge — do NOT mark as ready for review — I will review the PR on GitHub and merge myself.", "style"=>"approve", "confirm"=>false, "prompt"=>false),
     Dict("label"=>"Open PR + note", "status"=>"open-pr", "comment"=>"", "style"=>"approve", "confirm"=>false, "prompt"=>true),
     Dict("label"=>"Revise", "status"=>"changes-requested", "comment"=>"", "style"=>"changes", "confirm"=>false, "prompt"=>true),
-    Dict("label"=>"Reject", "status"=>"rejected", "comment"=>"Rejected — not worth pursuing.", "style"=>"reject", "confirm"=>true, "prompt"=>false),
-    Dict("label"=>"Skip", "status"=>"skipped", "comment"=>"Skipping this issue for now.", "style"=>"skip", "confirm"=>false, "prompt"=>false),
+    Dict("label"=>"Reject", "status"=>"rejected", "comment"=>"REJECTED. Do not pursue this issue. Do not open a PR.", "style"=>"reject", "confirm"=>true, "prompt"=>false),
+    Dict("label"=>"Skip", "status"=>"skipped", "comment"=>"SKIPPED. Move on to the next issue. Do not spend more time on this.", "style"=>"skip", "confirm"=>false, "prompt"=>false),
 ]
 
 _default_quick_comments() = [
