@@ -93,9 +93,63 @@ function _fetch_worktree_diff(worktree_path)
     end
 end
 
+function _run_mwe(script_path, run_dir)
+    isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
+    isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
+    try
+        io = IOBuffer()
+        cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
+        proc = run(pipeline(cmd; stdout=io, stderr=io); wait=true)
+        (; exit_code=proc.exitcode, output=String(take!(io)))
+    catch e
+        if e isa ProcessFailedException
+            io_out = try; String(take!(e.procs[1].out)); catch; ""; end
+            (; exit_code=e.procs[1].exitcode, output=io_out)
+        else
+            (; exit_code=-1, output="Error: $(sprint(showerror, e))")
+        end
+    end
+end
+
+function _run_mwe_safe(script_path, run_dir)
+    # Capture output even on failure
+    isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
+    isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
+    out_file = tempname()
+    try
+        cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
+        open(out_file, "w") do f
+            proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
+            wait(proc)
+            return (; exit_code=proc.exitcode, output=read(out_file, String))
+        end
+    catch e
+        output = isfile(out_file) ? read(out_file, String) : ""
+        code = e isa ProcessFailedException ? -1 : -1
+        (; exit_code=code, output=isempty(output) ? "Error: $(sprint(showerror, e))" : output)
+    finally
+        rm(out_file; force=true)
+    end
+end
+
+# Find the repo root for a worktree (to run the MWE on main)
+function _repo_main_dir(worktree_path)
+    isdir(worktree_path) || return nothing
+    try
+        # git worktree points back to the main repo
+        root = strip(read(setenv(`git rev-parse --git-common-dir`; dir=worktree_path), String))
+        # git-common-dir returns the .git dir; parent is the repo root
+        main = dirname(root)
+        isdir(main) ? main : nothing
+    catch
+        nothing
+    end
+end
+
 @dynamicstruct struct AsyncIssueData
     discussion[issue_url] = _fetch_issue_discussion(issue_url)
     diff[worktree_path] = _fetch_worktree_diff(worktree_path)
+    mwe[script_path, run_dir] = _run_mwe_safe(script_path, run_dir)
 end
 _async_issues = AsyncIssueData(; cache_type=:parallel)
 
@@ -107,6 +161,12 @@ end
 
 function _worktree_diff(worktree_path)
     fetchindex(_async_issues.diff, worktree_path) do rv, status
+        rv isa Task ? nothing : rv
+    end
+end
+
+function _mwe_result(script_path, run_dir)
+    fetchindex(_async_issues.mwe, script_path, run_dir) do rv, status
         rv isa Task ? nothing : rv
     end
 end
@@ -462,6 +522,16 @@ end
     .disc-comment-body.markdown-body h3 { font-size: 0.9rem; margin: 0.4rem 0 0.2rem; }
     .disc-comment-body.markdown-body pre { font-size: 0.8rem; padding: 0.5rem; }
     .disc-comment-body.markdown-body ul, .disc-comment-body.markdown-body ol { margin: 0.3rem 0 0.3rem 1.5rem; }
+    .mwe-section { margin-top: 0.75rem; }
+    .mwe-section summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #0969da; padding: 0.3rem 0; }
+    .mwe-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; }
+    @media (max-width: 1000px) { .mwe-grid { grid-template-columns: 1fr; } }
+    .mwe-panel { border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; }
+    .mwe-panel-header { padding: 0.4rem 0.75rem; font-size: 0.8rem; font-weight: 600; border-bottom: 1px solid #d0d7de; }
+    .mwe-panel-header.mwe-pass { background: #dafbe1; color: #1a7f37; }
+    .mwe-panel-header.mwe-fail { background: #ffebe9; color: #cf222e; }
+    .mwe-panel-header.mwe-loading { background: #f6f8fa; color: #888; }
+    .mwe-panel pre { padding: 0.5rem 0.75rem; font-size: 0.75rem; max-height: 300px; overflow-y: auto; margin: 0; background: #fafbfc; white-space: pre-wrap; word-wrap: break-word; }
     .diff-viewer { margin-bottom: 0.75rem; }
     .diff-viewer summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #0969da; padding: 0.3rem 0; }
     .diff-file { border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 0.5rem; overflow: hidden; }
@@ -511,6 +581,57 @@ end
             )("Loading issue discussion...")
         else
             h.div(class="issue-discussion")(_render_issue_data(data))
+        end
+    end
+
+    _render_mwe_panel(label, result, script_path, run_dir) = begin
+        if isnothing(result)
+            h.div(class="mwe-panel")(
+                h.div(class="mwe-panel-header mwe-loading")("$label — running..."),
+                h.pre(; hx_get=query_url("/mwe_output"; script=script_path, dir=run_dir, label),
+                    hx_trigger="every 3s", hx_swap="outerHTML",
+                )("Running MWE..."),
+            )
+        else
+            pass = result.exit_code == 0
+            h.div(class="mwe-panel")(
+                h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
+                    "$label — $(pass ? "PASS (exit 0)" : "FAIL (exit $(result.exit_code))")"
+                ),
+                h.pre(_html_escape(result.output)),
+            )
+        end
+    end
+
+    _render_mwe(slug, worktree) = begin
+        script = joinpath(proposals_dir(), "$slug.jl")
+        isfile(script) || return ""
+        main_dir = _repo_main_dir(worktree)
+        main_result = isnothing(main_dir) ? (; exit_code=-1, output="(cannot find main repo)") : _mwe_result(script, main_dir)
+        worktree_result = _mwe_result(script, worktree)
+        h.details(class="mwe-section"; open="")(
+            h.summary("MWE Results"),
+            h.div(class="mwe-grid")(
+                _render_mwe_panel["main", main_result, script, something(main_dir, "")],
+                _render_mwe_panel["worktree", worktree_result, script, worktree],
+            ),
+        )
+    end
+
+    @get mwe_output(; script="", dir="", label="") = begin
+        result = _mwe_result(script, dir)
+        if isnothing(result)
+            h.pre(; hx_get=query_url("/mwe_output"; script, dir, label),
+                hx_trigger="every 3s", hx_swap="outerHTML",
+            )("Running MWE...")
+        else
+            pass = result.exit_code == 0
+            h.div(class="mwe-panel")(
+                h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
+                    "$label — $(pass ? "PASS (exit 0)" : "FAIL (exit $(result.exit_code))")"
+                ),
+                h.pre(_html_escape(result.output)),
+            )
         end
     end
 
@@ -662,7 +783,10 @@ end
                 !isempty(issue) ? _render_discussion[issue] : "",
             ),
             # Footer — diff spans full width
-            !isempty(worktree) ? h.div(class="card-footer")(_render_diff[worktree]) : "",
+            !isempty(worktree) ? h.div(class="card-footer")(
+                _render_mwe[slug, worktree],
+                _render_diff[worktree],
+            ) : "",
         )
     end
 
@@ -763,7 +887,7 @@ end
                 "Write proposals to ", h.code(proposals_dir()), ". ",
                 "Each proposal must have a concise, accurate description of the proposed changes — this is what Niko reviews. ",
                 h.br(),
-                h.strong("MWE required: "), "Every proposal must include a minimal working example (MWE) that fails on main but passes with the proposed changes. Include it in the proposal body. ",
+                h.strong("MWE required: "), "Save a standalone Julia script as ", h.code("<slug>.jl"), " next to the proposal ", h.code("<slug>.md"), ". It must fail (non-zero exit) on main and pass (exit 0) with your changes. The web UI runs it automatically from both contexts. ",
                 h.br(),
                 h.strong("Status lifecycle: "), h.code("pending → open-pr → pr-open → approved/changes-requested/rejected"), ". ",
                 "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
