@@ -119,6 +119,7 @@ _default_responses() = [
     Dict("label"=>"Revise", "status"=>"changes-requested", "comment"=>"", "style"=>"changes", "confirm"=>false, "prompt"=>true),
     Dict("label"=>"Reject", "status"=>"rejected", "comment"=>"REJECTED. Do not pursue this issue. Do not open a PR.", "style"=>"reject", "confirm"=>true, "prompt"=>false),
     Dict("label"=>"Skip", "status"=>"skipped", "comment"=>"SKIPPED. Move on to the next issue. Do not spend more time on this.", "style"=>"skip", "confirm"=>false, "prompt"=>false),
+    Dict("label"=>"Reset", "status"=>"pending", "comment"=>"", "style"=>"", "confirm"=>true, "prompt"=>false),
 ]
 
 _default_quick_comments() = [
@@ -376,12 +377,22 @@ end
     .container { max-width: 1600px; margin: 0 auto; padding: 2rem; }
     h1 { margin-bottom: 1.5rem; }
     h1 small { font-weight: 400; font-size: 0.6em; color: #666; }
-    .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; gap: 0 1.5rem; }
+    .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; gap: 0 1.5rem; border-left: 4px solid #d0d7de; }
+    .proposal-card.status-pending { border-left-color: #888; }
+    .proposal-card.status-open-pr { border-left-color: #2da44e; }
+    .proposal-card.status-pr-open { border-left-color: #8250df; }
+    .proposal-card.status-approved { border-left-color: #2da44e; }
+    .proposal-card.status-changes-requested { border-left-color: #d29922; }
+    .proposal-card.status-rejected { border-left-color: #cf222e; }
+    .proposal-card.status-skipped { border-left-color: #666; }
     .proposal-card .card-header { grid-column: 1 / -1; }
     .proposal-card .card-left { min-width: 0; }
     .proposal-card .card-right { min-width: 0; overflow-y: auto; max-height: 80vh; }
     .proposal-card .card-footer { grid-column: 1 / -1; }
     @media (max-width: 1000px) { .proposal-card { grid-template-columns: 1fr; } .proposal-card .card-right { max-height: none; } }
+    @keyframes status-flash { 0% { background: #fef3c7; } 100% { background: white; } }
+    .proposal-card.just-updated { animation: status-flash 1.5s ease-out; }
+    .htmx-request .btn { opacity: 0.6; pointer-events: none; }
     .proposal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; }
     .proposal-title { font-size: 1.2rem; font-weight: 600; }
     .proposal-title a { color: #0969da; text-decoration: none; }
@@ -564,36 +575,38 @@ end
 
             cls = isempty(style) ? "" : "btn-$style"
             base_url = "/respond/$slug/$new_status"
-            # hx-vals sends JSON as form data (works with POST kwargs)
-            # Always include hx-vals to ensure a request body exists (Oxygen crashes on empty POST body)
-            vals = """{"msg": $(JSON.json(cmt))}"""
-            btn_attrs = if prompt
+            if prompt
                 # "prompt" buttons: hx-include grabs the text input (name=msg) as formdata
-                (; class="btn $cls", hx_post=base_url,
+                h.button(; class="btn $cls", hx_post=base_url,
                     hx_target="#proposals-list", hx_swap="innerHTML",
-                    hx_include="#comment-input-$slug")
-            elseif confirm
-                (; class="btn $cls", hx_post=base_url,
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    hx_vals=vals, hx_confirm="$label this proposal?")
+                    hx_include="#comment-input-$slug",
+                )(label)
             else
-                (; class="btn $cls", hx_post=base_url,
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    hx_vals=vals)
+                # Use a mini form with hidden input to avoid hx-vals quote escaping issues
+                form_attrs = confirm ?
+                    (; hx_post=base_url, hx_target="#proposals-list", hx_swap="innerHTML",
+                       hx_confirm="$label this proposal?", style="display:inline") :
+                    (; hx_post=base_url, hx_target="#proposals-list", hx_swap="innerHTML",
+                       style="display:inline")
+                h.form(; form_attrs...)(
+                    h.input(; type="hidden", name="msg", value=cmt),
+                    h.button(; class="btn $cls", type="submit")(label),
+                )
             end
-            h.button(; btn_attrs...)(label)
         end
 
         # Quick comment buttons
         quick_buttons = map(_quick_comments()) do qc
-            h.button(; class="btn btn-quick",
-                hx_post="/add_comment/$slug",
+            h.form(; hx_post="/add_comment/$slug",
                 hx_target="#proposals-list", hx_swap="innerHTML",
-                hx_vals="""{"msg": $(JSON.json(qc))}""",
-            )(qc)
+                style="display:inline",
+            )(
+                h.input(; type="hidden", name="msg", value=qc),
+                h.button(; class="btn btn-quick", type="submit")(qc),
+            )
         end
 
-        h.div(; class="proposal-card", id="proposal-$slug")(
+        h.div(; class="proposal-card status-$status", id="proposal-$slug")(
             # Header — spans both columns
             h.div(class="card-header")(
                 h.div(class="proposal-header")(
@@ -698,7 +711,16 @@ end
                     });
                 }
                 highlightDiffs();
-                document.body.addEventListener('htmx:afterSettle', highlightDiffs);
+                document.body.addEventListener('htmx:afterSettle', function() {
+                    highlightDiffs();
+                    // Flash cards that were just updated
+                    document.querySelectorAll('.proposal-card').forEach(function(card) {
+                        card.classList.add('just-updated');
+                        card.addEventListener('animationend', function() {
+                            card.classList.remove('just-updated');
+                        }, {once: true});
+                    });
+                });
                 document.body.addEventListener('toggle', function(e) {
                     if (e.target.open) setTimeout(highlightDiffs, 10);
                 }, true);
