@@ -7,17 +7,26 @@ using Dates
 using JSON
 
 proposals_dir() = IssueReview.proposals_dir()
-config_dir() = dirname(proposals_dir())
+config_dir() = IssueReview.issues_root()
+repo_dirs() = IssueReview.repo_dirs()
 
 # --- Async GitHub issue fetching ---
 
-function _fetch_issue_discussion(issue_url)
-    m = match(r"github\.com/([^/]+/[^/]+)/issues/(\d+)", issue_url)
-    isnothing(m) && return Dict("error" => "could not parse issue URL")
-    repo_slug, issue_num = m.captures
+function _fetch_issue_discussion(url)
+    issue_m = match(r"github\.com/([^/]+/[^/]+)/issues/(\d+)", url)
+    pr_m = match(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", url)
+    m = !isnothing(issue_m) ? issue_m : pr_m
+    isnothing(m) && return Dict("error" => "could not parse URL: $url")
+    repo_slug, num = m.captures
+    is_pr = !isnothing(pr_m) && isnothing(issue_m)
     try
-        raw = strip(read(`gh issue view $issue_num --repo $repo_slug --json title,body,comments,author,createdAt,labels --comments`, String))
-        JSON.parse(raw)
+        cmd = is_pr ?
+            `gh pr view $num --repo $repo_slug --json title,body,comments,author,createdAt,labels,reviews --comments` :
+            `gh issue view $num --repo $repo_slug --json title,body,comments,author,createdAt,labels --comments`
+        raw = strip(read(cmd, String))
+        data = JSON.parse(raw)
+        is_pr && (data["_is_pr"] = true)
+        data
     catch e
         Dict("error" => "gh CLI failed: $(sprint(showerror, e))")
     end
@@ -79,17 +88,55 @@ function _render_issue_data(data)
         ))
     end
 
+    # PR reviews (if present)
+    reviews = get(data, "reviews", [])
+    for r in reviews
+        rauthor = get(get(r, "author", Dict()), "login", "unknown")
+        rstate = get(r, "state", "")
+        rbody = get(r, "body", "")
+        isempty(rbody) && isempty(rstate) && continue
+        state_badge = if rstate == "APPROVED"
+            h.span(; style="color:#1a7f37;font-weight:600")(" ✓ approved")
+        elseif rstate == "CHANGES_REQUESTED"
+            h.span(; style="color:#d29922;font-weight:600")(" ✎ changes requested")
+        elseif rstate == "COMMENTED"
+            h.span(; style="color:#666")(" commented")
+        else
+            ""
+        end
+        push!(nodes, h.div(class="disc-comment")(
+            h.div(class="disc-comment-header")(
+                h.strong(rauthor), state_badge,
+            ),
+            !isempty(rbody) ? h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(rbody))) : "",
+        ))
+    end
+
     h.div()(nodes...)
 end
 
 function _fetch_worktree_diff(worktree_path)
     isdir(worktree_path) || return "(worktree not found: $worktree_path)"
     try
-        diff = read(setenv(`git diff HEAD`; dir=worktree_path), String)
-        isempty(diff) && return "(no changes in worktree)"
+        # Diff against the main branch (where the worktree diverged from)
+        # Use merge-base to find the common ancestor
+        main_branch = strip(read(setenv(`git rev-parse --abbrev-ref origin/HEAD`; dir=worktree_path), String))
+        if isempty(main_branch) || startswith(main_branch, "fatal")
+            main_branch = "origin/main"
+        end
+        base = strip(read(setenv(`git merge-base $main_branch HEAD`; dir=worktree_path), String))
+        diff = read(setenv(`git diff $base HEAD`; dir=worktree_path), String)
+        isempty(diff) && return "(no changes vs main)"
         diff
     catch e
-        "Error reading diff: $(sprint(showerror, e))"
+        # Fallback: try simple diff against origin/main
+        try
+            diff = read(setenv(`git diff origin/main...HEAD`; dir=worktree_path), String)
+            isempty(diff) && return "(no changes vs main)"
+            diff
+        catch e2
+            "Error reading diff: $(sprint(showerror, e2))"
+        end
     end
 end
 
@@ -216,8 +263,7 @@ end
 # --- Responses config (editable via web UI) ---
 
 _default_responses() = [
-    Dict("label"=>"Open PR", "status"=>"open-pr", "comment"=>"APPROVED. Open a DRAFT PR (gh pr create --draft). Include a concise but accurate description of all changes in the PR body. Do NOT merge — do NOT mark as ready for review — I will review the PR on GitHub and merge myself.", "style"=>"approve", "confirm"=>false, "prompt"=>false),
-    Dict("label"=>"Open PR + note", "status"=>"open-pr", "comment"=>"", "style"=>"approve", "confirm"=>false, "prompt"=>true),
+    Dict("label"=>"Open PR", "status"=>"", "comment"=>"", "style"=>"approve", "confirm"=>false, "prompt"=>false, "action"=>"pr_preview"),
     Dict("label"=>"Revise", "status"=>"changes-requested", "comment"=>"", "style"=>"changes", "confirm"=>false, "prompt"=>true),
     Dict("label"=>"Reject", "status"=>"rejected", "comment"=>"REJECTED. Do not pursue this issue. Do not open a PR.", "style"=>"reject", "confirm"=>true, "prompt"=>false),
     Dict("label"=>"Skip", "status"=>"skipped", "comment"=>"SKIPPED. Move on to the next issue. Do not spend more time on this.", "style"=>"skip", "confirm"=>false, "prompt"=>false),
@@ -227,6 +273,7 @@ _default_responses() = [
 _default_quick_comments() = [
     Dict("msg"=>"Looks good but needs tests.", "status"=>"changes-requested"),
     Dict("msg"=>"Simplify — this can be a one-liner.", "status"=>"changes-requested"),
+    Dict("msg"=>"Check PR comments and address feedback.", "status"=>"changes-requested"),
     Dict("msg"=>"Check if there's an existing PR for this.", "status"=>""),
     Dict("msg"=>"Not urgent, deprioritize.", "status"=>"skipped"),
     Dict("msg"=>"Add a docstring for the new export.", "status"=>"changes-requested"),
@@ -279,9 +326,14 @@ function parse_proposal(path)
 end
 
 function list_proposals()
-    dir = proposals_dir()
-    isdir(dir) || return []
-    files = [f for f in readdir(dir; join=true) if endswith(f, ".md") && !startswith(basename(f), "_")]
+    files = String[]
+    for rd in repo_dirs()
+        pdir = joinpath(rd, "proposals")
+        isdir(pdir) || continue
+        for f in readdir(pdir; join=true)
+            endswith(f, ".md") && !startswith(basename(f), "_") && push!(files, f)
+        end
+    end
     sort!(files; by=mtime, rev=true)
     [parse_proposal(f) for f in files]
 end
@@ -480,7 +532,7 @@ end
     .container { max-width: 1600px; margin: 0 auto; padding: 2rem; }
     h1 { margin-bottom: 1.5rem; }
     h1 small { font-weight: 400; font-size: 0.6em; color: #666; }
-    .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; gap: 0 1.5rem; border-left: 4px solid #d0d7de; }
+    .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; border-left: 4px solid #d0d7de; }
     .proposal-card.status-pending { border-left-color: #888; }
     .proposal-card.status-open-pr { border-left-color: #2da44e; }
     .proposal-card.status-pr-open { border-left-color: #8250df; }
@@ -488,11 +540,14 @@ end
     .proposal-card.status-changes-requested { border-left-color: #d29922; }
     .proposal-card.status-rejected { border-left-color: #cf222e; }
     .proposal-card.status-skipped { border-left-color: #666; }
-    .proposal-card .card-header { grid-column: 1 / -1; }
-    .proposal-card .card-left { min-width: 0; }
-    .proposal-card .card-right { min-width: 0; overflow-y: auto; max-height: 80vh; }
-    .proposal-card .card-footer { grid-column: 1 / -1; }
-    @media (max-width: 1000px) { .proposal-card { grid-template-columns: 1fr; } .proposal-card .card-right { max-height: none; } }
+    .proposal-card > summary { cursor: pointer; list-style: none; }
+    .proposal-card > summary::-webkit-details-marker { display: none; }
+    .proposal-card > summary::marker { display: none; content: ""; }
+    .card-body { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; gap: 0 1.5rem; margin-top: 0.75rem; }
+    .card-body .card-left { min-width: 0; }
+    .card-body .card-right { min-width: 0; overflow-y: auto; max-height: 80vh; }
+    .card-body .card-footer { grid-column: 1 / -1; }
+    @media (max-width: 1000px) { .card-body { grid-template-columns: 1fr; } .card-body .card-right { max-height: none; } }
     @keyframes status-flash { 0% { background: #fef3c7; } 100% { background: white; } }
     .proposal-card.just-updated { animation: status-flash 1.5s ease-out; }
     .htmx-request .btn { opacity: 0.6; pointer-events: none; }
@@ -574,13 +629,16 @@ end
     .mwe-panel-header.mwe-fail { background: #ffebe9; color: #cf222e; }
     .mwe-panel-header.mwe-loading { background: #f6f8fa; color: #888; }
     .mwe-panel pre { padding: 0.5rem 0.75rem; font-size: 0.75rem; max-height: 300px; overflow-y: auto; margin: 0; background: #fafbfc; white-space: pre-wrap; word-wrap: break-word; }
+    .mwe-script-wrap { display: flex; margin-top: 0.3rem; background: #f6f8fa; border-radius: 4px; font-size: 0.75rem; }
+    .mwe-line-nums { padding: 0.5rem 0.5rem 0.5rem 0.5rem; text-align: right; color: #8b949e; user-select: none; border-right: 1px solid #d0d7de; line-height: 1.4; font-family: "SFMono-Regular", Consolas, monospace; white-space: pre; }
+    .mwe-script-wrap pre { margin: 0; padding: 0.5rem 0.75rem; background: none; flex: 1; overflow-x: auto; line-height: 1.4; }
     .diff-viewer { margin-bottom: 0.75rem; }
     .diff-viewer summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #0969da; padding: 0.3rem 0; }
     .diff-file { border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 0.5rem; overflow: hidden; }
     .diff-file-header { background: #f6f8fa; padding: 0.4rem 0.75rem; font-size: 0.8rem; font-weight: 600; font-family: monospace; border-bottom: 1px solid #d0d7de; color: #24292f; }
-    .diff-table { width: 100%; border-collapse: collapse; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.75rem; line-height: 1.4; table-layout: fixed; }
+    .diff-table { width: 100%; border-collapse: collapse; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.75rem; line-height: 1.4; }
     .diff-table td { padding: 0 0.5rem; vertical-align: top; white-space: pre-wrap; word-wrap: break-word; }
-    .diff-ln { width: 45px; min-width: 45px; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; }
+    .diff-ln { width: auto; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; white-space: nowrap !important; word-wrap: normal !important; }
     .diff-sign { width: 16px; min-width: 16px; text-align: center; user-select: none; }
     .diff-code { overflow-x: auto; }
     .diff-add { background: #dafbe1; }
@@ -602,7 +660,7 @@ end
         if isnothing(data)
             h.div(class="issue-discussion")(
                 h.span(; class="issue-loading",
-                    hx_get=query_url("/issue_discussion"; url=issue_url),
+                    hx_get=@query_url(issue_discussion(; url=issue_url)),
                     hx_trigger="every 2s",
                     hx_swap="outerHTML",
                 )("Loading issue discussion..."),
@@ -617,13 +675,29 @@ end
         data = _issue_discussion(url)
         if isnothing(data)
             h.span(; class="issue-loading",
-                hx_get=query_url("/issue_discussion"; url),
+                hx_get=@query_url(issue_discussion(; url)),
                 hx_trigger="every 2s",
                 hx_swap="outerHTML",
             )("Loading issue discussion...")
         else
             h.div(class="issue-discussion")(_render_issue_data(data))
         end
+    end
+
+    @post refresh_discussion(; url="") = begin
+        isempty(url) && return h.span()("No URL")
+        # Evict cache and re-fetch
+        fetchindex(_async_issues.discussion, url; force=true) do rv, _
+            rv isa Task ? nothing : rv
+        end
+        # Return loading state — polling will pick up the result
+        h.div(class="issue-discussion")(
+            h.span(; class="issue-loading",
+                hx_get=@query_url(issue_discussion(; url)),
+                hx_trigger="every 2s",
+                hx_swap="outerHTML",
+            )("Refreshing..."),
+        )
     end
 
     _render_mwe_panel(label, result, script_path, run_dir) = begin
@@ -633,7 +707,7 @@ end
             live_output = isfile(out_path) ? read(out_path, String) : ""
             h.div(class="mwe-panel")(
                 h.div(class="mwe-panel-header mwe-loading")("$label — running..."),
-                h.pre(; hx_get=query_url("/mwe_stream"; script=script_path, dir=run_dir, label),
+                h.pre(; hx_get=@query_url(mwe_stream(; script=script_path, dir=run_dir, label)),
                     hx_trigger="every 2s", hx_swap="outerHTML",
                 )(_html_escape(isempty(live_output) ? "Starting..." : live_output)),
             )
@@ -664,7 +738,7 @@ end
         if isnothing(result)
             # Still running — return current file content with continued polling
             live_output = isfile(out_path) ? read(out_path, String) : "Starting..."
-            h.pre(; hx_get=query_url("/mwe_stream"; script, dir, label),
+            h.pre(; hx_get=@query_url(mwe_stream(; script, dir, label)),
                 hx_trigger="every 2s", hx_swap="outerHTML",
             )(_html_escape(live_output))
         else
@@ -687,8 +761,8 @@ end
         end
     end
 
-    _find_mwe_scripts(slug) = begin
-        dir = proposals_dir()
+    _find_mwe_scripts(slug, proposals_path) = begin
+        dir = dirname(proposals_path)
         isdir(dir) || return String[]
         # Match <slug>.jl, <slug>-foo.jl, <slug>_bar.jl etc.
         [f for f in readdir(dir; join=true) if endswith(f, ".jl") && startswith(basename(f), slug)]
@@ -710,22 +784,23 @@ end
         h.div(; style="margin-bottom:0.75rem")(
             h.div(; style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem")(
                 h.strong(; style="font-size:0.85rem")(sname),
-                !show_panels ? h.form(; hx_post=query_url("/run_mwe"; script, worktree),
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    style="display:inline",
-                )(
-                    h.button(; class="btn btn-approve", type="submit", style=btn_style)("Run"),
+                !show_panels ? post_form("/run_mwe";
+                    label="Run", btn_class="btn btn-approve", hx_target="#proposals-list", hx_swap="innerHTML",
+                    script, worktree,
                 ) : "",
-                show_panels ? h.form(; hx_post=query_url("/rerun_mwe"; script, worktree),
-                    hx_target="#proposals-list", hx_swap="innerHTML",
-                    style="display:inline",
-                )(
-                    h.button(; class="btn", type="submit", style=btn_style)("Rerun"),
+                show_panels ? post_form("/rerun_mwe";
+                    label="Rerun", btn_class="btn", hx_target="#proposals-list", hx_swap="innerHTML",
+                    script, worktree,
                 ) : "",
             ),
-            h.pre(; style="font-size:0.75rem;background:#f6f8fa;padding:0.5rem;border-radius:4px;max-height:300px;overflow-y:auto;margin-top:0.3rem")(
-                h.code(; class="language-julia")(_html_escape(read(script, String))),
-            ),
+            begin
+                script_lines = split(read(script, String), '\n')
+                nlines = length(script_lines)
+                h.div(class="mwe-script-wrap")(
+                    h.div(class="mwe-line-nums")(join(1:nlines, "\n")),
+                    h.pre()(h.code(; class="language-julia")(_html_escape(join(script_lines, '\n')))),
+                )
+            end,
             show_panels ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
                 !isnothing(main_dir) ? _render_mwe_panel("main", main_result, script, main_dir) : "",
                 _render_mwe_panel("worktree", worktree_result, script, worktree),
@@ -733,8 +808,8 @@ end
         )
     end
 
-    _render_mwe(slug, worktree) = begin
-        scripts = _find_mwe_scripts(slug)
+    _render_mwe(slug, worktree, proposals_path, status="pending") = begin
+        scripts = _find_mwe_scripts(slug, proposals_path)
         isempty(scripts) && return ""
         main_dir = _repo_main_dir(worktree)
         any_results = any(scripts) do s
@@ -743,66 +818,75 @@ end
             !isnothing(r1) || !isnothing(r2)
         end
 
-        mwe_details = any_results ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
+        closed_statuses = ("approved", "rejected", "skipped")
+        should_open = status ∉ closed_statuses
+        mwe_details = should_open ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
         mwe_details(
             h.summary("MWE ($(length(scripts)) script$(length(scripts) == 1 ? "" : "s"))"),
             [_render_single_mwe(s, worktree, main_dir) for s in scripts]...,
             # Run all button
-            !any_results && length(scripts) > 1 ? h.form(;
-                hx_post=query_url("/run_all_mwe"; slug, worktree),
-                hx_target="#proposals-list", hx_swap="innerHTML",
-                style="margin-top:0.5rem",
-            )(
-                h.button(; class="btn btn-approve", type="submit")("Run All"),
+            !any_results && length(scripts) > 1 ? post_form("/run_all_mwe";
+                label="Run All", btn_class="btn btn-approve", hx_target="#proposals-list", hx_swap="innerHTML",
+                slug, worktree, proposals_path,
             ) : "",
         )
     end
 
-    @post run_mwe(; script="", worktree="") = begin
+    @post run_mwe(; script="", worktree="", _filter="all") = begin
         main_dir = _repo_main_dir(worktree)
         !isnothing(main_dir) && _mwe_result(script, main_dir)
         !isempty(worktree) && _mwe_result(script, worktree)
-        _render_list("all") |> to_response
+        _render_list(_filter) |> to_response
     end
 
-    @post rerun_mwe(; script="", worktree="") = begin
+    @post rerun_mwe(; script="", worktree="", _filter="all") = begin
         main_dir = _repo_main_dir(worktree)
+        # Write marker files so streaming shows "Restarting..."
         for d in [main_dir, worktree]
             isnothing(d) && continue
             isempty(d) && continue
             p = _mwe_output_path(script, d)
             open(p, "w") do f; println(f, "# Restarting MWE..."); end
         end
-        Threads.@spawn begin
-            !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
-            !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        end
-        hx_response(""; redirect="/")
+        # Evict cache + restart computation synchronously.
+        # fetchindex with force=true pops old entry and spawns a new Task internally,
+        # returning immediately. _render_list then sees in-progress Tasks → "running..." panels.
+        !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        _render_list(_filter) |> to_response
     end
 
-    @post run_all_mwe(; slug="", worktree="") = begin
-        scripts = _find_mwe_scripts(slug)
+    @post run_all_mwe(; slug="", worktree="", proposals_path="", _filter="all") = begin
+        scripts = _find_mwe_scripts(slug, proposals_path)
         for s in scripts
             main_dir = _repo_main_dir(worktree)
             !isnothing(main_dir) && _mwe_result(s, main_dir)
             !isempty(worktree) && _mwe_result(s, worktree)
         end
-        _render_list("all") |> to_response
+        _render_list(_filter) |> to_response
     end
 
-    _render_diff(worktree) = begin
+    _render_diff(worktree, status="pending") = begin
         diff_text = _worktree_diff(worktree)
+        # Auto-refresh stale diffs (cached from old code or empty)
+        if !isnothing(diff_text) && startswith(diff_text, "(")
+            fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+            diff_text = nothing  # show loading state
+        end
+        closed_statuses = ("approved", "rejected", "skipped")
+        should_open = status ∉ closed_statuses
         if isnothing(diff_text)
             h.div(class="diff-viewer")(
                 h.span(; class="issue-loading",
-                    hx_get=query_url("/worktree_diff"; path=worktree),
+                    hx_get=@query_url(worktree_diff(; path=worktree)),
                     hx_trigger="every 2s",
                     hx_swap="outerHTML",
                 )("Loading diff..."),
             )
         else
             nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
-            h.details(class="diff-viewer")(
+            diff_details = should_open ? h.details(class="diff-viewer"; open="") : h.details(class="diff-viewer")
+            diff_details(
                 h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
                 render_diff_html(diff_text),
             )
@@ -814,7 +898,7 @@ end
         diff_text = _worktree_diff(path)
         if isnothing(diff_text)
             h.span(; class="issue-loading",
-                hx_get=query_url("/worktree_diff"; path),
+                hx_get=@query_url(worktree_diff(; path)),
                 hx_trigger="every 2s",
                 hx_swap="outerHTML",
             )("Loading diff...")
@@ -827,6 +911,20 @@ end
         end
     end
 
+    @post refresh_diff(; path="") = begin
+        isempty(path) && return h.span()("No path")
+        fetchindex(_async_issues.diff, path; force=true) do rv, _
+            rv isa Task ? nothing : rv
+        end
+        h.div(class="diff-viewer")(
+            h.span(; class="issue-loading",
+                hx_get=@query_url(worktree_diff(; path)),
+                hx_trigger="every 2s",
+                hx_swap="outerHTML",
+            )("Refreshing diff..."),
+        )
+    end
+
     _render_proposal(p) = begin
         fname = basename(p.path)
         slug = replace(fname, ".md" => "")
@@ -836,6 +934,8 @@ end
         pr = pr in ("null", "") ? nothing : pr
         worktree = get(p.yaml, "worktree", "")
         body_html = Markdown.html(Markdown.parse(p.body))
+        # Derive repo name from path: .../RepoName/proposals/slug.md
+        repo_name = basename(dirname(dirname(p.path)))
 
         p.yaml["_path"] = p.path
         comments = parse_comments(p.yaml)
@@ -853,25 +953,30 @@ end
             style = get(resp, "style", "")
             confirm = get(resp, "confirm", false)
             prompt = get(resp, "prompt", false)
+            action = get(resp, "action", "")
 
             cls = isempty(style) ? "" : "btn-$style"
-            base_url = "/respond/$slug/$new_status"
-            if prompt
+            if action == "pr_preview"
+                # Load PR form inline in the card
+                h.button(; class="btn $cls",
+                    hx_get="/pr_form/$slug",
+                    hx_target="#pr-form-$slug",
+                    hx_swap="innerHTML",
+                )(label)
+            elseif prompt
                 # "prompt" buttons: hx-include grabs the text input (name=msg) as formdata
+                base_url = "/respond/$slug/$new_status"
                 h.button(; class="btn $cls", hx_post=base_url,
                     hx_target="#proposals-list", hx_swap="innerHTML",
                     hx_include="#comment-input-$slug",
                 )(label)
             else
-                # Use a mini form with hidden input to avoid hx-vals quote escaping issues
-                form_attrs = confirm ?
-                    (; hx_post=base_url, hx_target="#proposals-list", hx_swap="innerHTML",
-                       hx_confirm="$label this proposal?", style="display:inline") :
-                    (; hx_post=base_url, hx_target="#proposals-list", hx_swap="innerHTML",
-                       style="display:inline")
-                h.form(; form_attrs...)(
-                    h.input(; type="hidden", name="msg", value=cmt),
-                    h.button(; class="btn $cls", type="submit")(label),
+                base_url = "/respond/$slug/$new_status"
+                post_form(base_url;
+                    label, btn_class="btn $cls",
+                    hx_target="#proposals-list", hx_swap="innerHTML",
+                    confirm=confirm ? "$label this proposal?" : "",
+                    msg=cmt,
                 )
             end
         end
@@ -892,56 +997,73 @@ end
                 ""
             end
             post_url = isempty(qstatus) ? "/add_comment/$slug" : "/respond/$slug/$qstatus"
-            h.form(; hx_post=post_url,
+            post_form(post_url;
+                label=msg, btn_class="btn btn-quick $color_cls",
                 hx_target="#proposals-list", hx_swap="innerHTML",
-                style="display:inline",
-            )(
-                h.input(; type="hidden", name="msg", value=msg),
-                h.button(; class="btn btn-quick $color_cls", type="submit")(msg),
+                msg,
             )
         end
 
-        h.div(; class="proposal-card status-$status", id="proposal-$slug")(
-            # Header — spans both columns
-            h.div(class="card-header")(
+        h.details(; class="proposal-card status-$status", id="proposal-$slug", open="")(
+            h.summary(class="card-header")(
                 h.div(class="proposal-header")(
                     h.div(class="proposal-title")(
-                        !isempty(issue) ? h.a(; href=issue, target="_blank")(fname) : fname
+                        h.span(; style="font-size:0.75em;color:#666;font-weight:400;margin-right:0.5em")(repo_name),
+                        h.a(; href="/proposal/$slug")(fname),
                     ),
-                    status_badge(status),
+                    h.div(; style="display:flex;align-items:center;gap:0.5rem")(
+                        h.button(; class="btn", style="font-size:0.7rem;padding:0.1rem 0.4rem",
+                            hx_post="/refresh_card/$slug",
+                            hx_target="#proposals-list",
+                            hx_swap="innerHTML",
+                            onclick="event.stopPropagation()",
+                        )("↻"),
+                        status_badge(status),
+                    ),
                 ),
                 !isempty(meta_parts) ? h.div(class="proposal-meta")(meta_parts...) : "",
             ),
-            # Left column — summary + actions
-            h.div(class="card-left")(
-                h.div(class="proposal-body")(body_html),
-                !isempty(comments) ? h.div(class="comments")(
-                    h.strong("Comments:"),
-                    [h.div(class="comment")(c) for c in comments]...,
-                ) : "",
-                h.div(class="actions")(
-                    h.div(class="actions-row")(action_buttons...),
-                    h.div(class="actions-row")(
-                        h.form(; class="comment-form",
-                            hx_post="/add_comment/$slug", hx_target="#proposals-list", hx_swap="innerHTML",
-                        )(
-                            h.input(; type="text", name="msg", id="comment-input-$slug",
-                                placeholder="Add a note..."),
-                            h.button(; class="btn", type="submit")("Comment"),
+            h.div(class="card-body")(
+                # Left column — summary + actions
+                h.div(class="card-left")(
+                    h.div(class="proposal-body")(body_html),
+                    !isempty(comments) ? h.div(class="comments")(
+                        h.strong("Comments:"),
+                        [h.div(class="comment")(c) for c in comments]...,
+                    ) : "",
+                    h.div(class="actions")(
+                        h.div(class="actions-row")(action_buttons...),
+                        h.div(class="actions-row")(
+                            post_form("/add_comment/$slug",
+                                h.input(; type="text", name="msg", id="comment-input-$slug",
+                                    placeholder="Add a note...");
+                                label="Comment", form_class="comment-form",
+                                hx_target="#proposals-list", hx_swap="innerHTML",
+                            ),
                         ),
+                        h.div(class="actions-row")(quick_buttons...),
                     ),
-                    h.div(class="actions-row")(quick_buttons...),
+                ),
+                # Right column — issue discussion + PR discussion
+                h.div(class="card-right")(
+                    !isempty(issue) ? _render_discussion(issue) : "",
+                    !isnothing(pr) ? h.div(; style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid #d0d7de")(
+                        h.div(; style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem")(
+                            "Pull Request ",
+                            h.a(; href=pr, target="_blank", style="font-weight:400;font-size:0.8rem")(pr),
+                        ),
+                        _render_discussion(pr),
+                    ) : "",
+                ),
+                # Footer — PR form + diff spans full width
+                h.div(class="card-footer")(
+                    h.div(; id="pr-form-$slug")(),
+                    !isempty(worktree) ? h.div()(
+                        _render_mwe(slug, worktree, p.path, status),
+                        _render_diff(worktree, status),
+                    ) : "",
                 ),
             ),
-            # Right column — issue discussion
-            h.div(class="card-right")(
-                !isempty(issue) ? _render_discussion(issue) : "",
-            ),
-            # Footer — diff spans full width
-            !isempty(worktree) ? h.div(class="card-footer")(
-                _render_mwe(slug, worktree),
-                _render_diff(worktree),
-            ) : "",
         )
     end
 
@@ -957,15 +1079,16 @@ end
             n = f == "all" ? length(proposals) : count(p -> get(p.yaml, "status", "pending") == f, proposals)
             (n == 0 && f != "all" && f != filter_val) && continue
             push!(filter_links_list, h.a(;
-                href=query_url("/"; filter=f),
-                hx_get=query_url("/"; filter=f),
+                href=@query_url(index(; filter=f)),
+                hx_get=@query_url(index(; filter=f)),
                 hx_target="#proposals-list", hx_swap="innerHTML",
-                hx_push_url=query_url("/"; filter=f),
+                hx_push_url=@query_url(index(; filter=f)),
                 class=(f == filter_val ? "active" : ""),
             )("$f ($n)"))
         end
 
         vcat(
+            [h.input(; type="hidden", id="current-filter", name="_filter", value=filter_val)],
             [h.div(class="filter-bar")(filter_links_list...)],
             isempty(ps) ? [h.p("No proposals with status: $filter_val")] :
                 [_render_proposal(p) for p in ps],
@@ -1022,35 +1145,86 @@ end
                     }
                 });
                 document.body.addEventListener('toggle', function(e) {
-                    if (e.target.open) setTimeout(highlightDiffs, 10);
+                    if (e.target.open) setTimeout(highlightCode, 10);
                 }, true);
             """),
         );
         htmx_version="2.0.8", hyperscript_version=nothing, pico_version=nothing,
     )
 
+    _agent_instructions_md = begin
+        parts = String[]
+        # Root-level CLAUDE.md (shared instructions)
+        root_md = joinpath(config_dir(), "CLAUDE.md")
+        isfile(root_md) && push!(parts, read(root_md, String))
+        # Per-repo CLAUDE.md files
+        for rd in repo_dirs()
+            rd == config_dir() && continue  # skip root, already included
+            repo_md = joinpath(rd, "CLAUDE.md")
+            if isfile(repo_md)
+                push!(parts, "---\n\n# $(basename(rd))\n\n" * read(repo_md, String))
+            end
+        end
+        join(parts, "\n\n")
+    end
+
+    @get instructions = begin
+        md = _agent_instructions_md
+        if wants_markdown(req)
+            markdown_response(md)
+        else
+            _page(h.div(class="container")(
+                h.div(class="nav-links")(
+                    h.a(; href="/")("← Back to reviews"),
+                ),
+                h.div(class="proposal-body")(Markdown.html(Markdown.parse(md))),
+            )) |> to_response
+        end
+    end
+
+    @get proposal(slug) = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        p = parse_proposal(path)
+        content = h.div()(
+            h.h1("Issue Review ", h.small("proposals → review → PR")),
+            h.div(class="nav-links")(
+                h.a(; href="/")("← All proposals"),
+            ),
+            h.div(; id="proposals-list", hx_include="#current-filter")(
+                h.input(; type="hidden", id="current-filter", name="_filter", value="all"),
+                _render_proposal(p),
+            ),
+        )
+        _page(content) |> to_response
+    end
+
     @get index(; filter="all") = begin
+        md = _agent_instructions_md
         content = h.div()(
             h.h1("Issue Review ", h.small("proposals → review → PR")),
             h.div(class="nav-links")(
                 h.a(; href="/config", hx_get="/config", hx_target="#proposals-list",
                     hx_push_url="/config")("Configure responses"),
+                h.a(; href="/instructions")("Agent instructions"),
             ),
-            h.div(class="agent-instructions")(
-                h.strong("Agent workflow: "),
-                "Write proposals to ", h.code(proposals_dir()), ". ",
-                "Each proposal must have a concise, accurate description of the proposed changes — this is what Niko reviews. ",
-                h.br(),
-                h.strong("MWE required: "), "Save a standalone Julia script as ", h.code("<slug>.jl"), " next to the proposal ", h.code("<slug>.md"), " (multiple OK: ", h.code("<slug>-foo.jl"), "). Must fail (non-zero exit) on main, pass (exit 0) on worktree. Niko runs them via the web UI. Outputs are saved as ", h.code("<slug>.main.out"), " / ", h.code("<slug>.worktree.out"), " in the proposals dir. ",
-                h.br(),
-                h.strong("Status lifecycle: "), h.code("pending → open-pr → pr-open → approved/changes-requested/rejected"), ". ",
-                "When status is ", h.code("open-pr"), ", open a ", h.strong("draft"), " PR (", h.code("gh pr create --draft"), ") and set ", h.code("pr:"), " + ", h.code("status: pr-open"), ". ",
-                h.strong("Never merge — "), "only Niko merges after reviewing the PR on GitHub.",
-            ),
-            h.div(; id="proposals-list")(_render_list(filter)...),
+            !isempty(md) ? h.details(class="agent-instructions")(
+                h.summary(h.strong("Agent workflow"), " ", h.span(; style="font-weight:normal;font-size:0.8em;color:#666")("(click to expand)")),
+                h.div(; id="instructions-content")(
+                    h.div(; style="margin-bottom:0.5rem;display:flex;gap:0.5rem")(
+                        h.button(; class="btn", style="font-size:0.75rem;padding:0.15rem 0.5rem",
+                            onclick="var c=document.getElementById('instructions-content'); var md=c.querySelector('.instructions-md'); var html=c.querySelector('.instructions-html'); if(md.style.display==='none'){md.style.display='';html.style.display='none';this.textContent='Show rendered'}else{md.style.display='none';html.style.display='';this.textContent='Show markdown'}")("Show rendered"),
+                        h.button(; class="btn", style="font-size:0.75rem;padding:0.15rem 0.5rem",
+                            onclick="var md=document.getElementById('instructions-content').querySelector('.instructions-md'); navigator.clipboard.writeText(md.textContent).then(function(){this.textContent='Copied!';setTimeout(function(){this.textContent='Copy markdown'}.bind(this),1500)}.bind(this))")("Copy markdown"),
+                    ),
+                    h.pre(; class="instructions-md", style="font-size:0.8rem;background:#f6f8fa;padding:0.75rem;border-radius:4px;white-space:pre-wrap;word-wrap:break-word;user-select:all")(_html_escape(md)),
+                    h.div(; class="instructions-html proposal-body", style="display:none")(Markdown.html(Markdown.parse(md))),
+                ),
+            ) : "",
+            h.div(; id="proposals-list", hx_include="#current-filter")(_render_list(filter)...),
             # Poll for file changes; show banner when updates available
             h.div(; id="poll-sentinel",
-                hx_get=query_url("/proposals_hash"; current_hash=_proposals_hash),
+                hx_get=@query_url(proposals_hash(; current_hash=_proposals_hash)),
                 hx_trigger="every 5s",
                 hx_swap="outerHTML",
                 data_hash=_proposals_hash,
@@ -1065,9 +1239,16 @@ end
     end
 
     _proposals_hash = begin
-        dir = proposals_dir()
-        files = isdir(dir) ? sort([f for f in readdir(dir; join=true) if endswith(f, ".md")]) : String[]
-        parts = [string(basename(f), ":", filesize(f), ":", mtime(f)) for f in files]
+        files = String[]
+        for rd in repo_dirs()
+            pdir = joinpath(rd, "proposals")
+            isdir(pdir) || continue
+            for f in readdir(pdir; join=true)
+                endswith(f, ".md") && push!(files, f)
+            end
+        end
+        sort!(files)
+        parts = [string(f, ":", filesize(f), ":", mtime(f)) for f in files]
         string(hash(join(parts, "|")))
     end
 
@@ -1077,20 +1258,20 @@ end
         if changed
             # Show update banner — clicking it refreshes the list
             h.div(; id="poll-sentinel",
-                hx_get=query_url("/proposals_hash"; current_hash=new_hash),
+                hx_get=@query_url(proposals_hash(; current_hash=new_hash)),
                 hx_trigger="every 5s",
                 hx_swap="outerHTML", data_hash=new_hash,
             )(
                 h.div(; id="update-banner",
                     style="position:fixed;top:0;left:0;right:0;background:#0969da;color:white;padding:0.5rem 1rem;text-align:center;cursor:pointer;z-index:100;font-size:0.9rem;",
-                    hx_get=query_url("/"; filter="all"),
+                    hx_get=@query_url(index(; filter="all")),
                     hx_target="#proposals-list", hx_swap="innerHTML",
                     onclick="this.parentElement.style.display='none'",
                 )("Proposals updated — click to refresh"),
             )
         else
             h.div(; id="poll-sentinel",
-                hx_get=query_url("/proposals_hash"; current_hash=new_hash),
+                hx_get=@query_url(proposals_hash(; current_hash=new_hash)),
                 hx_trigger="every 5s",
                 hx_swap="outerHTML",
                 data_hash=new_hash,
@@ -1152,21 +1333,319 @@ end
 
     # --- Action endpoints ---
 
-    _do_respond(slug, new_status, msg) = begin
-        path = joinpath(proposals_dir(), "$slug.md")
-        isfile(path) || return to_response(h.p("Not found: $slug"))
-        update_yaml!(path, "status", new_status)
-        !isempty(msg) && add_comment!(path, msg)
+    _find_proposal(slug) = begin
+        for rd in repo_dirs()
+            path = joinpath(rd, "proposals", "$slug.md")
+            isfile(path) && return path
+        end
+        nothing
+    end
+
+    @post refresh_card(slug) = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        p = parse_proposal(path)
+        issue = get(p.yaml, "issue", "")
+        pr_val = get(p.yaml, "pr", "")
+        pr_val = pr_val in ("null", "") ? nothing : pr_val
+        worktree = get(p.yaml, "worktree", "")
+        # Evict all caches for this card
+        !isempty(issue) && fetchindex(_async_issues.discussion, issue; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isnothing(pr_val) && fetchindex(_async_issues.discussion, pr_val; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isempty(worktree) && fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        @info "REFRESH_CARD evicted caches for $slug"
+        # Re-render just the card body — need to call _render_proposal and extract the card-body
+        # Simpler: re-render the whole list
         _render_list("all") |> to_response
     end
 
-    @post respond(slug, new_status; msg="") = _do_respond(slug, new_status, msg)
-
-    @post add_comment(slug; msg="") = begin
-        path = joinpath(proposals_dir(), "$slug.md")
-        isfile(path) || return to_response(h.p("Not found: $slug"))
+    _do_respond(slug, new_status, msg, _filter) = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        update_yaml!(path, "status", new_status)
         !isempty(msg) && add_comment!(path, msg)
-        _render_list("all") |> to_response
+        _render_list(_filter) |> to_response
+    end
+
+    @post respond(slug, new_status; msg="", _filter="all") = _do_respond(slug, new_status, msg, _filter)
+
+    @post add_comment(slug; msg="", _filter="all") = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        !isempty(msg) && add_comment!(path, msg)
+        _render_list(_filter) |> to_response
+    end
+
+    # --- PR creation ---
+
+    _generate_pr_body_claude(p) = begin
+        slug = replace(basename(p.path), ".md" => "")
+        issue = get(p.yaml, "issue", "")
+        worktree = get(p.yaml, "worktree", "")
+        lines = String[]
+
+        # Proposal description
+        push!(lines, p.body)
+        push!(lines, "")
+
+        # MWE section
+        scripts = _find_mwe_scripts(slug, p.path)
+        if !isempty(scripts)
+            push!(lines, "## MWE")
+            push!(lines, "")
+            for script in scripts
+                sname = basename(script)
+                push!(lines, "### `$sname`")
+                push!(lines, "")
+                push!(lines, "````julia")
+                push!(lines, read(script, String))
+                push!(lines, "````")
+                push!(lines, "")
+                # Include outputs
+                for label in ["main", "worktree"]
+                    out_path = _mwe_output_path(script, label == "main" ? _repo_main_dir(worktree) : worktree)
+                    isnothing(out_path) && continue
+                    if isfile(out_path)
+                        push!(lines, "**$label output:**")
+                        push!(lines, "````")
+                        push!(lines, read(out_path, String))
+                        push!(lines, "````")
+                        push!(lines, "")
+                    end
+                end
+            end
+        end
+
+        # Issue link
+        !isempty(issue) && push!(lines, "Fixes $issue")
+        push!(lines, "")
+
+        join(lines, "\n")
+    end
+
+    _generate_pr_title(p) = begin
+        # Extract a short title from the proposal filename or first heading
+        slug = replace(basename(p.path), ".md" => "")
+        issue_num = match(r"^(\d+)", slug)
+        # Try to get title from first ## heading in body
+        title_m = match(r"^##\s+(.+)"m, p.body)
+        title = isnothing(title_m) ? replace(slug, "-" => " ") : title_m.captures[1]
+        isnothing(issue_num) ? title : "Fix #$(issue_num.captures[1]): $title"
+    end
+
+    @get pr_form(slug) = begin
+        @info "PR_FORM GET" slug
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        p = parse_proposal(path)
+        worktree = get(p.yaml, "worktree", "")
+        issue = get(p.yaml, "issue", "")
+        existing_pr = get(p.yaml, "pr", "")
+        existing_pr = existing_pr in ("null", "") ? nothing : existing_pr
+        is_update = !isnothing(existing_pr)
+
+        pr_title = _generate_pr_title(p)
+        claude_body = _generate_pr_body_claude(p)
+
+        repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
+        repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
+
+        branch = ""
+        if !isempty(worktree) && isdir(worktree)
+            try; branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String)); catch; end
+        end
+
+        action_label = is_update ? "Update PR Description" : "Create Draft PR"
+
+        h.div(; style="border:1px solid #d0d7de;border-radius:6px;padding:1rem;margin-bottom:0.75rem;background:white")(
+            h.div(; style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem")(
+                h.h3(; style="margin:0")(is_update ? "Update PR" : "Create Draft PR"),
+                h.button(; class="btn", style="font-size:0.75rem",
+                    onclick="this.closest('[id^=\"pr-form-\"]').innerHTML=''")("Cancel"),
+            ),
+            is_update ? h.p(; style="font-size:0.85rem;color:#666;margin-bottom:0.5rem")(h.a(; href=existing_pr, target="_blank")(existing_pr)) : "",
+            !isempty(repo_slug) ? h.p(; style="font-size:0.8rem;color:#888;margin-bottom:0.5rem")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
+            h.form(; hx_post="/create_pr/$slug", hx_target="#pr-form-$slug", hx_swap="innerHTML")(
+                h.label(; style="font-size:0.85rem;font-weight:600")("Title"),
+                h.input(; type="text", name="pr_title", value=pr_title,
+                    style="width:100%;padding:0.3rem;font-size:0.9rem;border:1px solid #ccc;border-radius:4px;margin:0.3rem 0 0.75rem"),
+                h.label(; style="font-size:0.85rem;font-weight:600")("Your comment ", h.small(; style="font-weight:400;color:#888")("(top of PR body)")),
+                h.textarea(; name="human_comment", rows="3",
+                    style="width:100%;padding:0.3rem;font-family:inherit;font-size:0.85rem;border:1px solid #ccc;border-radius:4px;margin:0.3rem 0 0.75rem",
+                    placeholder="Optional: add context, notes for reviewers...")("I'll check the changes before marking it as ready for review."),
+                h.div(; style="margin-bottom:0.75rem")(
+                    h.label(; style="font-size:0.85rem;font-weight:600")("Auto-generated content ", h.small(; style="font-weight:400;color:#888")("(will appear below divider on GitHub)")),
+                    h.pre(; style="border:1px solid #d0d7de;border-radius:4px;padding:0.75rem;background:#fafbfc;margin-top:0.3rem;font-size:0.8rem;white-space:pre-wrap;word-wrap:break-word;max-height:400px;overflow-y:auto")(_html_escape(claude_body)),
+                ),
+                h.textarea(; name="claude_body", style="display:none")(claude_body),
+                h.input(; type="hidden", name="repo_slug", value=repo_slug),
+                h.input(; type="hidden", name="worktree", value=worktree),
+                h.input(; type="hidden", name="branch", value=branch),
+                h.input(; type="hidden", name="existing_pr", value=isnothing(existing_pr) ? "" : existing_pr),
+                h.div(; style="display:flex;gap:0.5rem")(
+                    h.button(; class="btn btn-approve", type="submit")(action_label),
+                ),
+            ),
+        )
+    end
+
+    @get pr_preview(slug) = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        p = parse_proposal(path)
+        worktree = get(p.yaml, "worktree", "")
+        issue = get(p.yaml, "issue", "")
+        existing_pr = get(p.yaml, "pr", "")
+        existing_pr = existing_pr in ("null", "") ? nothing : existing_pr
+        is_update = !isnothing(existing_pr)
+
+        pr_title = _generate_pr_title(p)
+        claude_body = _generate_pr_body_claude(p)
+
+        # Detect repo for gh command
+        repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
+        repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
+
+        # Detect branch name from worktree
+        branch = ""
+        if !isempty(worktree) && isdir(worktree)
+            try
+                branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
+            catch; end
+        end
+
+        action_label = is_update ? "Update PR Description" : "Create Draft PR"
+        heading = is_update ? h.h2("Update PR: ", h.a(; href=existing_pr, target="_blank")(existing_pr)) :
+                              h.h2("Create Draft PR: ", h.code(slug))
+
+        content = h.div()(
+            h.div(class="nav-links")(
+                h.a(; href="/", hx_get="/", hx_target="body", hx_push_url="/")("← Back to reviews"),
+            ),
+            heading,
+            !isempty(repo_slug) ? h.p(; style="font-size:0.85rem;color:#666")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
+            h.div(class="config-section")(
+                h.h3("PR Title"),
+                h.form(; hx_post="/create_pr/$slug", hx_target="body", hx_swap="innerHTML")(
+                    h.input(; type="text", name="pr_title", value=pr_title,
+                        style="width:100%;padding:0.4rem;font-size:0.95rem;border:1px solid #ccc;border-radius:4px;margin-bottom:0.75rem"),
+                    h.h3("Your comment ", h.small(; style="font-weight:400;color:#888")("(appears at the top of the PR body)")),
+                    h.textarea(; name="human_comment", rows="4",
+                        style="width:100%;padding:0.5rem;font-family:inherit;font-size:0.9rem;border:1px solid #ccc;border-radius:4px;margin-bottom:0.75rem",
+                        placeholder="Optional: add context, notes for reviewers...")("I'll check the changes before marking it as ready for review."),
+                    h.h3("Auto-generated content ", h.small(; style="font-weight:400;color:#888")("(preview — appears below the divider)")),
+                    h.div(; style="border:1px solid #d0d7de;border-radius:6px;padding:1rem;background:#fafbfc;margin-bottom:1rem")(
+                        h.div(class="proposal-body")(Markdown.html(Markdown.parse(claude_body))),
+                    ),
+                    h.textarea(; name="claude_body", style="display:none")(_html_escape(claude_body)),
+                    h.input(; type="hidden", name="repo_slug", value=repo_slug),
+                    h.input(; type="hidden", name="worktree", value=worktree),
+                    h.input(; type="hidden", name="branch", value=branch),
+                    h.input(; type="hidden", name="existing_pr", value=isnothing(existing_pr) ? "" : existing_pr),
+                    h.div(; style="display:flex;gap:0.5rem")(
+                        h.button(; class="btn btn-approve", type="submit")(action_label),
+                        h.a(; href="/", class="btn")("Cancel"),
+                    ),
+                ),
+            ),
+        )
+        _page(h.div(class="container")(content)) |> to_response
+    end
+
+    _build_pr_body(human_comment, claude_body) = begin
+        body_parts = String[]
+        if !isempty(human_comment)
+            push!(body_parts, human_comment)
+            push!(body_parts, "")
+        end
+        push!(body_parts, "*Human content above*")
+        push!(body_parts, "")
+        push!(body_parts, "---")
+        push!(body_parts, "")
+        push!(body_parts, "*Claude content below*")
+        push!(body_parts, "")
+        push!(body_parts, claude_body)
+        join(body_parts, "\n")
+    end
+
+    @post create_pr(slug; pr_title="", human_comment="", claude_body="", repo_slug="", worktree="", branch="", existing_pr="") = begin
+        @info "CREATE_PR" slug pr_title existing_pr repo_slug branch worktree length(claude_body)
+        path = _find_proposal(slug)
+        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        is_update = !isempty(existing_pr)
+        @info "CREATE_PR" is_update path
+
+        full_body = _build_pr_body(human_comment, claude_body)
+        @info "CREATE_PR step 2: body built" length(full_body)
+
+        # Push branch if needed (skip for updates — branch already on remote)
+        result_msg = ""
+        if !is_update && !isempty(worktree) && isdir(worktree)
+            @info "CREATE_PR pushing branch" branch
+            try
+                proc = run(pipeline(setenv(`git push -u origin $branch`; dir=worktree); stdout=devnull, stderr=devnull); wait=false)
+                # Timeout after 30 seconds
+                t = Timer(30)
+                @async begin; wait(t); process_running(proc) && kill(proc); end
+                wait(proc)
+                close(t)
+                @info "CREATE_PR push done" proc.exitcode
+                proc.exitcode != 0 && (result_msg = "Warning: git push exited with $(proc.exitcode)\n")
+            catch e
+                @info "CREATE_PR push failed" sprint(showerror, e)
+                result_msg = "Warning: git push failed: $(sprint(showerror, e))\n"
+            end
+        end
+
+        @info "CREATE_PR step 4: is_update=$is_update"
+        if is_update
+            # Update existing PR description
+            pr_m = match(r"/pull/(\d+)", existing_pr)
+            if !isnothing(pr_m) && !isempty(repo_slug)
+                pr_num = pr_m.captures[1]
+                try
+                    body_file = tempname()
+                    write(body_file, full_body)
+                    @info "CREATE_PR running gh pr edit" pr_num repo_slug pr_title body_file
+                    output = read(`gh pr edit $pr_num --repo $repo_slug --title $pr_title --body-file $body_file`, String)
+                    @info "CREATE_PR gh pr edit output" output
+                    rm(body_file; force=true)
+                    add_comment!(path, "PR description updated")
+                    result_msg *= "PR description updated: $existing_pr"
+                catch e
+                    @info "CREATE_PR gh pr edit FAILED" sprint(showerror, e)
+                    result_msg *= "Error updating PR: $(sprint(showerror, e))"
+                end
+            else
+                result_msg *= "Could not parse PR number from: $existing_pr"
+            end
+        elseif !isempty(repo_slug) && !isempty(branch)
+            # Create new draft PR
+            try
+                body_file = tempname()
+                write(body_file, full_body)
+                pr_url = strip(read(setenv(`gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $branch`; dir=worktree), String))
+                rm(body_file; force=true)
+                update_yaml!(path, "pr", pr_url)
+                update_yaml!(path, "status", "pr-open")
+                add_comment!(path, "Draft PR created: $pr_url")
+                result_msg *= "Draft PR created: $pr_url"
+            catch e
+                result_msg *= "Error creating PR: $(sprint(showerror, e))"
+            end
+        else
+            result_msg = "Missing repo_slug or branch — cannot create PR"
+        end
+
+        # Inline result
+        success = !contains(result_msg, "Error") && !contains(result_msg, "Missing") && !contains(result_msg, "Could not")
+        color = success ? "#1a7f37" : "#cf222e"
+        h.div(; style="padding:0.75rem;border:1px solid $(success ? "#2da44e" : "#cf222e");border-radius:6px;background:$(success ? "#dafbe1" : "#ffebe9");margin-bottom:0.75rem")(
+            h.p(; style="font-size:0.9rem;color:$color;margin:0")(result_msg),
+            success ? h.p(; style="font-size:0.8rem;color:#666;margin:0.3rem 0 0")(
+                "Reload the page to see updated status.",
+            ) : "",
+        ) |> to_response
     end
 end
 
