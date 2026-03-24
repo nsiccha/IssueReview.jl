@@ -442,31 +442,29 @@ function _prism_lang(filename)
     "none"
 end
 
-function _diff_code_cell(text, lang)
-    lang == "none" ?
-        h.td(class="diff-code")(_html_escape(text)) :
-        h.td(class="diff-code")(h.code(; class="language-$lang")(_html_escape(text)))
-end
-
 function render_diff_html(diff_text)
     startswith(diff_text, "(") && return h.p(; style="color:#888;font-size:0.85rem")(diff_text)
     lines = split(diff_text, '\n')
-    files = []  # Vector of (filename, lang, rows)
+    # Each file collects: (filename, lang, rows, code_lines)
+    # code_lines: the raw text per code row (parallel to rows), or nothing for hunk rows
+    files = []
     current_file = ""
     current_lang = "none"
     current_rows = []
+    current_code = String[]  # raw code text per row (for highlighting)
     old_ln = 0
     new_ln = 0
 
     for line in lines
         if startswith(line, "diff --git")
             if !isempty(current_file)
-                push!(files, (current_file, current_lang, copy(current_rows)))
+                push!(files, (current_file, current_lang, copy(current_rows), copy(current_code)))
             end
             m = match(r"b/(.+)$", line)
             current_file = isnothing(m) ? line : m.captures[1]
             current_lang = _prism_lang(current_file)
             current_rows = []
+            current_code = String[]
             old_ln = 0; new_ln = 0
         elseif startswith(line, "@@")
             m = match(r"@@ -(\d+)", line)
@@ -480,6 +478,7 @@ function render_diff_html(diff_text)
                 h.td(; class="diff-sign")(),
                 h.td(class="diff-code")(_html_escape(line)),
             ))
+            push!(current_code, "")
         elseif startswith(line, "---") || startswith(line, "+++") ||
                startswith(line, "index ") || startswith(line, "new file") ||
                startswith(line, "old mode") || startswith(line, "new mode") ||
@@ -487,39 +486,58 @@ function render_diff_html(diff_text)
             # Skip diff metadata lines
         elseif startswith(line, "+")
             new_ln += 1
+            text = line[2:end]
             push!(current_rows, h.tr(class="diff-add")(
                 h.td(class="diff-ln")(""),
                 h.td(class="diff-ln")("$new_ln"),
                 h.td(class="diff-sign")("+"),
-                _diff_code_cell(line[2:end], current_lang),
+                h.td(class="diff-code")(_html_escape(text)),
             ))
+            push!(current_code, text)
         elseif startswith(line, "-")
             old_ln += 1
+            text = line[2:end]
             push!(current_rows, h.tr(class="diff-del")(
                 h.td(class="diff-ln")("$old_ln"),
                 h.td(class="diff-ln")(""),
                 h.td(class="diff-sign")("-"),
-                _diff_code_cell(line[2:end], current_lang),
+                h.td(class="diff-code")(_html_escape(text)),
             ))
+            push!(current_code, text)
         elseif !isempty(current_file)
             old_ln += 1; new_ln += 1
+            text = startswith(line, " ") ? line[2:end] : line
             push!(current_rows, h.tr(class="diff-ctx")(
                 h.td(class="diff-ln")("$old_ln"),
                 h.td(class="diff-ln")("$new_ln"),
                 h.td(class="diff-sign")(),
-                _diff_code_cell(startswith(line, " ") ? line[2:end] : line, current_lang),
+                h.td(class="diff-code")(_html_escape(text)),
             ))
+            push!(current_code, text)
         end
     end
-    !isempty(current_file) && push!(files, (current_file, current_lang, current_rows))
+    !isempty(current_file) && push!(files, (current_file, current_lang, current_rows, current_code))
 
     isempty(files) && return h.p(; style="color:#888;font-size:0.85rem")("(empty diff)")
 
+    file_id = 0
     h.div()(
-        [h.div(class="diff-file")(
-            h.div(class="diff-file-header")(fname),
-            h.table(class="diff-table")(h.tbody(rows...)),
-        ) for (fname, _lang, rows) in files]...
+        [begin
+            file_id += 1
+            id = "diff-file-$file_id"
+            # Hidden source block: Prism highlights the full code, then JS distributes to rows
+            source_block = lang == "none" ? "" :
+                h.pre(class="diff-hidden-source")(
+                    h.code(; id="$id-source", class="language-$lang")(
+                        _html_escape(join(code_lines, '\n'))
+                    )
+                )
+            h.div(class="diff-file")(
+                h.div(class="diff-file-header")(fname),
+                source_block,
+                h.table(; class="diff-table", data_source_id="$id-source")(h.tbody(rows...)),
+            )
+        end for (fname, lang, rows, code_lines) in files]...
     )
 end
 
@@ -640,7 +658,9 @@ end
     .diff-table td { padding: 0 0.5rem; vertical-align: top; white-space: pre-wrap; word-wrap: break-word; }
     .diff-ln { width: auto; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; white-space: nowrap !important; word-wrap: normal !important; }
     .diff-sign { width: 16px; min-width: 16px; text-align: center; user-select: none; }
-    .diff-code { overflow-x: auto; }
+    .diff-code { overflow-x: auto; white-space: pre !important; }
+    .diff-code code { white-space: pre !important; }
+    .diff-hidden-source { display: none; }
     .diff-add { background: #dafbe1; }
     .diff-add .diff-ln { background: #ccffd8; color: #1a7f37; }
     .diff-add .diff-sign { color: #1a7f37; }
@@ -1103,9 +1123,6 @@ end
             h.style(css),
             h.link(; rel="stylesheet", href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css"),
             h.style("""
-                .diff-table code[class*="language-"] { background: none; padding: 0; font-size: inherit; }
-                .diff-add code[class*="language-"] { background: none; }
-                .diff-del code[class*="language-"] { background: none; }
                 .diff-table .token.comment { color: #6a737d; }
                 .diff-table .token.string { color: #032f62; }
                 .diff-table .token.keyword { color: #d73a49; }
@@ -1124,7 +1141,31 @@ end
             h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js")(),
             h.script(; src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js")(),
             h.script("""
+                function highlightDiffTables() {
+                    document.querySelectorAll('.diff-table[data-source-id]').forEach(function(table) {
+                        var sourceId = table.dataset.sourceId;
+                        var sourceCode = document.getElementById(sourceId);
+                        if (!sourceCode || sourceCode.dataset.diffApplied) return;
+                        // Highlight the full code block as one unit
+                        if (!sourceCode.dataset.highlighted) {
+                            Prism.highlightElement(sourceCode);
+                            sourceCode.dataset.highlighted = '1';
+                        }
+                        sourceCode.dataset.diffApplied = '1';
+                        // Split highlighted HTML by newlines and distribute to table cells
+                        var highlightedLines = sourceCode.innerHTML.split('\\n');
+                        var cells = table.querySelectorAll('td.diff-code');
+                        for (var i = 0; i < cells.length && i < highlightedLines.length; i++) {
+                            if (highlightedLines[i] !== '') {
+                                cells[i].innerHTML = highlightedLines[i];
+                            }
+                        }
+                    });
+                }
                 function highlightCode() {
+                    // Diff tables: highlight full code block, then distribute to rows
+                    highlightDiffTables();
+                    // Regular code blocks (MWE scripts, etc.)
                     document.querySelectorAll('code[class*="language-"]:not([data-highlighted])').forEach(function(code) {
                         code.dataset.highlighted = '1';
                         Prism.highlightElement(code);
