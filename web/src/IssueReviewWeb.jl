@@ -145,7 +145,7 @@ function _run_mwe(script_path, run_dir)
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
     try
         io = IOBuffer()
-        cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
+        cmd = setenv(`julia -tauto --project=$run_dir $script_path`; dir=run_dir)
         proc = run(pipeline(cmd; stdout=io, stderr=io); wait=true)
         (; exit_code=proc.exitcode, output=String(take!(io)))
     catch e
@@ -187,7 +187,7 @@ function _run_mwe_safe(script_path, run_dir)
             # Run script
             println(f, "==> Running $(basename(script_path))")
             flush(f)
-            cmd = setenv(`julia --project=$run_dir $script_path`; dir=run_dir)
+            cmd = setenv(`julia -tauto --project=$run_dir $script_path`; dir=run_dir)
             proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
             wait(proc)
             flush(f)
@@ -836,7 +836,7 @@ end
         main_dir = _repo_main_dir(worktree)
         !isnothing(main_dir) && _mwe_result(script, main_dir)
         !isempty(worktree) && _mwe_result(script, worktree)
-        _render_list(_filter) |> to_response
+        _render_list(_filter)
     end
 
     @post rerun_mwe(; script="", worktree="", _filter="all") = begin
@@ -853,7 +853,7 @@ end
         # returning immediately. _render_list then sees in-progress Tasks → "running..." panels.
         !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
         !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        _render_list(_filter) |> to_response
+        _render_list(_filter)
     end
 
     @post run_all_mwe(; slug="", worktree="", proposals_path="", _filter="all") = begin
@@ -863,7 +863,7 @@ end
             !isnothing(main_dir) && _mwe_result(s, main_dir)
             !isempty(worktree) && _mwe_result(s, worktree)
         end
-        _render_list(_filter) |> to_response
+        _render_list(_filter)
     end
 
     _render_diff(worktree, status="pending") = begin
@@ -1095,7 +1095,7 @@ end
         )
     end
 
-    _page(content_node) = htmx(
+    page(content_node) = htmx(
         h.head(
             h.title("Issue Review"),
             h.meta(; charset="utf-8"),
@@ -1170,21 +1170,17 @@ end
 
     @get instructions = begin
         md = _agent_instructions_md
-        if wants_markdown(req)
-            markdown_response(md)
-        else
-            _page(h.div(class="container")(
-                h.div(class="nav-links")(
-                    h.a(; href="/")("← Back to reviews"),
-                ),
-                h.div(class="proposal-body")(Markdown.html(Markdown.parse(md))),
-            )) |> to_response
-        end
+        h.div(class="container")(
+            h.div(class="nav-links")(
+                h.a(; href="/")("← Back to reviews"),
+            ),
+            h.div(class="proposal-body")(Markdown.html(Markdown.parse(md))),
+        )
     end
 
     @get proposal(slug) = begin
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         p = parse_proposal(path)
         content = h.div()(
             h.h1("Issue Review ", h.small("proposals → review → PR")),
@@ -1196,7 +1192,7 @@ end
                 _render_proposal(p),
             ),
         )
-        _page(content) |> to_response
+        content
     end
 
     @get index(; filter="all") = begin
@@ -1232,9 +1228,9 @@ end
             )(),
         )
         if is_htmx(req)
-            h.div(; id="proposals-list")(_render_list(filter)...) |> to_response
+            h.div(; id="proposals-list")(_render_list(filter)...)
         else
-            _page(content) |> to_response
+            page[content]
         end
     end
 
@@ -1307,19 +1303,15 @@ end
                 )("Reset to defaults"),
             ),
         )
-        if is_htmx(req)
-            content |> to_response
-        else
-            _page(h.div(class="container")(content)) |> to_response
-        end
+        content
     end
 
     @post save_config(; config_json="") = begin
         if isempty(config_json)
-            return to_response(h.p(; style="color:red")("Empty config"))
+            return h.p(; style="color:red")("Empty config")
         end
         cfg = try; JSON.parse(config_json); catch e
-            return to_response(h.p(; style="color:red")("Invalid JSON: $(sprint(showerror, e))"))
+            return h.p(; style="color:red")("Invalid JSON: $(sprint(showerror, e))")
         end
         _save_config(cfg)
         hx_response(""; redirect="/config")
@@ -1343,7 +1335,7 @@ end
 
     @post refresh_card(slug) = begin
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         p = parse_proposal(path)
         issue = get(p.yaml, "issue", "")
         pr_val = get(p.yaml, "pr", "")
@@ -1356,24 +1348,24 @@ end
         @info "REFRESH_CARD evicted caches for $slug"
         # Re-render just the card body — need to call _render_proposal and extract the card-body
         # Simpler: re-render the whole list
-        _render_list("all") |> to_response
+        _render_list("all")
     end
 
     _do_respond(slug, new_status, msg, _filter) = begin
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         update_yaml!(path, "status", new_status)
         !isempty(msg) && add_comment!(path, msg)
-        _render_list(_filter) |> to_response
+        _render_list(_filter)
     end
 
     @post respond(slug, new_status; msg="", _filter="all") = _do_respond(slug, new_status, msg, _filter)
 
     @post add_comment(slug; msg="", _filter="all") = begin
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         !isempty(msg) && add_comment!(path, msg)
-        _render_list(_filter) |> to_response
+        _render_list(_filter)
     end
 
     # --- PR creation ---
@@ -1436,7 +1428,7 @@ end
     @get pr_form(slug) = begin
         @info "PR_FORM GET" slug
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         p = parse_proposal(path)
         worktree = get(p.yaml, "worktree", "")
         issue = get(p.yaml, "issue", "")
@@ -1491,7 +1483,7 @@ end
 
     @get pr_preview(slug) = begin
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         p = parse_proposal(path)
         worktree = get(p.yaml, "worktree", "")
         issue = get(p.yaml, "issue", "")
@@ -1549,7 +1541,7 @@ end
                 ),
             ),
         )
-        _page(h.div(class="container")(content)) |> to_response
+        content
     end
 
     _build_pr_body(human_comment, claude_body) = begin
@@ -1571,7 +1563,7 @@ end
     @post create_pr(slug; pr_title="", human_comment="", claude_body="", repo_slug="", worktree="", branch="", existing_pr="") = begin
         @info "CREATE_PR" slug pr_title existing_pr repo_slug branch worktree length(claude_body)
         path = _find_proposal(slug)
-        isnothing(path) && return to_response(h.p("Not found: $slug"))
+        isnothing(path) && return h.p("Not found: $slug")
         is_update = !isempty(existing_pr)
         @info "CREATE_PR" is_update path
 
@@ -1645,7 +1637,7 @@ end
             success ? h.p(; style="font-size:0.8rem;color:#666;margin:0.3rem 0 0")(
                 "Reload the page to see updated status.",
             ) : "",
-        ) |> to_response
+        )
     end
 end
 
