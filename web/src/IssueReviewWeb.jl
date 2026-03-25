@@ -125,13 +125,13 @@ function _fetch_worktree_diff(worktree_path)
             main_branch = "origin/main"
         end
         base = strip(read(setenv(`git merge-base $main_branch HEAD`; dir=worktree_path), String))
-        diff = read(setenv(`git diff $base HEAD`; dir=worktree_path), String)
+        diff = read(setenv(`git diff $base`; dir=worktree_path), String)
         isempty(diff) && return "(no changes vs main)"
         diff
     catch e
         # Fallback: try simple diff against origin/main
         try
-            diff = read(setenv(`git diff origin/main...HEAD`; dir=worktree_path), String)
+            diff = read(setenv(`git diff origin/main`; dir=worktree_path), String)
             isempty(diff) && return "(no changes vs main)"
             diff
         catch e2
@@ -161,21 +161,66 @@ end
 function _run_mwe_safe(script_path, run_dir)
     isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
+
+    mwe_dir = dirname(script_path)
+    setup_sh = joinpath(mwe_dir, "setup.sh")
+    project_toml = joinpath(mwe_dir, "Project.toml")
+    label = _is_main_dir(run_dir) ? "main" : "worktree"
+    # Use proposal's Project.toml if it exists, with a separate env per label
+    # to avoid main/worktree sharing a Manifest.toml
+    if isfile(project_toml)
+        project_dir = joinpath(mwe_dir, ".env-$label")
+        mkpath(project_dir)
+        cp(project_toml, joinpath(project_dir, "Project.toml"); force=true)
+    else
+        project_dir = run_dir
+    end
+
     # Stream output directly to the stable .out file so the UI can poll it live
     out_path = _mwe_output_path(script_path, run_dir)
-    label = _is_main_dir(run_dir) ? "main" : "worktree"
     mkpath(dirname(out_path))
     result = try
         open(out_path, "w") do f
             println(f, "# MWE: $(basename(script_path)) on $label")
             println(f, "# started: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
             println(f, "# dir: $run_dir")
+            println(f, "# project: $project_dir")
             println(f, "---")
             flush(f)
+            # Run setup.sh if present
+            if isfile(setup_sh)
+                println(f, "==> Running setup.sh")
+                flush(f)
+                setup_cmd = setenv(`bash $setup_sh $run_dir $label`; dir=run_dir)
+                setup_proc = run(pipeline(setup_cmd; stdout=f, stderr=f); wait=false)
+                wait(setup_proc)
+                flush(f)
+                if setup_proc.exitcode != 0
+                    println(f, "\n# exit_code: $(setup_proc.exitcode)")
+                    println(f, "# status: FAIL (setup.sh)")
+                    return (; exit_code=setup_proc.exitcode, output=read(out_path, String))
+                end
+            end
+            # Dev the worktree package into the proposal environment if using proposal's Project.toml
+            # Only if the worktree is a Julia package (has Project.toml with a name field)
+            run_dir_project = joinpath(run_dir, "Project.toml")
+            if project_dir != run_dir && isfile(run_dir_project) && contains(read(run_dir_project, String), r"^name\s*="m)
+                println(f, "==> Pkg.develop(path=\"$run_dir\")")
+                flush(f)
+                dev_cmd = setenv(`julia --project=$project_dir -e "using Pkg; Pkg.develop(path=\"$run_dir\")"`; dir=run_dir)
+                dev_proc = run(pipeline(dev_cmd; stdout=f, stderr=f); wait=false)
+                wait(dev_proc)
+                flush(f)
+                if dev_proc.exitcode != 0
+                    println(f, "\n# exit_code: $(dev_proc.exitcode)")
+                    println(f, "# status: FAIL (Pkg.develop)")
+                    return (; exit_code=dev_proc.exitcode, output=read(out_path, String))
+                end
+            end
             # Instantiate
             println(f, "==> Pkg.instantiate()")
             flush(f)
-            inst = setenv(`julia --project=$run_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
+            inst = setenv(`julia --project=$project_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
             inst_proc = run(pipeline(inst; stdout=f, stderr=f); wait=false)
             wait(inst_proc)
             flush(f)
@@ -187,7 +232,8 @@ function _run_mwe_safe(script_path, run_dir)
             # Run script
             println(f, "==> Running $(basename(script_path))")
             flush(f)
-            cmd = setenv(`julia -tauto --project=$run_dir $script_path`; dir=run_dir)
+            mwe_env = Dict("MWE_LABEL" => label, "MWE_RUN_DIR" => run_dir)
+            cmd = setenv(addenv(`julia -tauto --project=$project_dir $script_path`, mwe_env); dir=run_dir)
             proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
             wait(proc)
             flush(f)
@@ -209,7 +255,6 @@ function _run_mwe_safe(script_path, run_dir)
 end
 
 function _mwe_output_path(script_path, run_dir)
-    # e.g. proposals/411-rand-momentum-api.main.out or .worktree.out
     slug = replace(basename(script_path), ".jl" => "")
     label = _is_main_dir(run_dir) ? "main" : "worktree"
     joinpath(dirname(script_path), "$slug.$label.out")
@@ -330,8 +375,11 @@ function list_proposals()
     for rd in repo_dirs()
         pdir = joinpath(rd, "proposals")
         isdir(pdir) || continue
-        for f in readdir(pdir; join=true)
-            endswith(f, ".md") && !startswith(basename(f), "_") && push!(files, f)
+        for d in readdir(pdir; join=true)
+            isdir(d) || continue
+            startswith(basename(d), "_") && continue
+            pf = joinpath(d, "proposal.md")
+            isfile(pf) && push!(files, pf)
         end
     end
     sort!(files; by=mtime, rev=true)
@@ -532,8 +580,8 @@ function render_diff_html(diff_text)
                         _html_escape(join(code_lines, '\n'))
                     )
                 )
-            h.div(class="diff-file")(
-                h.div(class="diff-file-header")(fname),
+            h.details(; class="diff-file", open="")(
+                h.summary(class="diff-file-header")(fname),
                 source_block,
                 h.table(; class="diff-table", data_source_id="$id-source")(h.tbody(rows...)),
             )
@@ -563,7 +611,7 @@ end
     .proposal-card > summary::marker { display: none; content: ""; }
     .card-body { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; gap: 0 1.5rem; margin-top: 0.75rem; }
     .card-body .card-left { min-width: 0; }
-    .card-body .card-right { min-width: 0; overflow-y: auto; max-height: 80vh; }
+    .card-body .card-right { min-width: 0; }
     .card-body .card-footer { grid-column: 1 / -1; }
     @media (max-width: 1000px) { .card-body { grid-template-columns: 1fr; } .card-body .card-right { max-height: none; } }
     @keyframes status-flash { 0% { background: #fef3c7; } 100% { background: white; } }
@@ -585,7 +633,8 @@ end
     .proposal-body pre code { background: none; padding: 0; }
     .proposal-body ul, .proposal-body ol { margin: 0.4rem 0 0.4rem 1.5rem; }
     .actions { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid #eee; }
-    .actions-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
+    .comment-form-sticky { position: sticky; top: 0; background: white; z-index: 10; padding: 0.5rem 0; border-bottom: 1px solid #eee; }
+    .actions-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; width: 100%; }
     .actions-row:last-child { margin-bottom: 0; }
     .btn { padding: 0.3rem 0.8rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; cursor: pointer; text-decoration: none; display: inline-block; background: #f6f8fa; color: #333; }
     .btn:hover { background: #e8e8e8; }
@@ -603,9 +652,11 @@ end
     .btn-quick-skip { border-left-color: #666; }
     .btn-quick-approve { border-left-color: #2da44e; }
     .btn-quick-reject { border-left-color: #cf222e; }
-    .comment-form { display: flex; gap: 0.5rem; flex: 1; min-width: 300px; }
-    .comment-form input { flex: 1; padding: 0.3rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; }
-    .comment-form button { white-space: nowrap; }
+    .comment-form { display: flex !important; gap: 0.5rem; width: 100%; }
+    .comment-form textarea { flex: 1; padding: 0.3rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; resize: vertical; min-height: 3rem; font-family: inherit; transition: border-color 0.15s; }
+    .comment-form textarea:focus { border-color: #2da44e; outline: none; box-shadow: 0 0 0 2px rgba(45,164,78,0.2); }
+    .comment-form textarea.ready-to-send { border-color: #0969da; box-shadow: 0 0 0 2px rgba(9,105,218,0.3); }
+    .comment-form button { display: none; }
     .comments { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #eee; }
     .comment { font-size: 0.85rem; color: #444; padding: 0.3rem 0; border-bottom: 1px solid #f0f0f0; }
     .comment:last-child { border-bottom: none; }
@@ -653,7 +704,10 @@ end
     .diff-viewer { margin-bottom: 0.75rem; }
     .diff-viewer summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #0969da; padding: 0.3rem 0; }
     .diff-file { border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 0.5rem; overflow: hidden; }
-    .diff-file-header { background: #f6f8fa; padding: 0.4rem 0.75rem; font-size: 0.8rem; font-weight: 600; font-family: monospace; border-bottom: 1px solid #d0d7de; color: #24292f; }
+    .diff-file-header { background: #f6f8fa; padding: 0.4rem 0.75rem; font-size: 0.8rem; font-weight: 600; font-family: monospace; border-bottom: 1px solid #d0d7de; color: #24292f; cursor: pointer; list-style: none; }
+    .diff-file-header::-webkit-details-marker { display: none; }
+    .diff-file-header::before { content: "▾ "; color: #8b949e; }
+    .diff-file:not([open]) > .diff-file-header::before { content: "▸ "; }
     .diff-table { width: 100%; border-collapse: collapse; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.75rem; line-height: 1.4; }
     .diff-table td { padding: 0 0.5rem; vertical-align: top; white-space: pre-wrap; word-wrap: break-word; }
     .diff-ln { width: auto; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; white-space: nowrap !important; word-wrap: normal !important; }
@@ -720,20 +774,28 @@ end
         )
     end
 
-    _render_mwe_panel(label, result, script_path, run_dir) = begin
+    _render_mwe_panel(label, result, script_path, run_dir; slug="") = begin
         out_path = _mwe_output_path(script_path, run_dir)
+        rerun_btn = post_form("/rerun_mwe_single";
+            label="↻", btn_class="btn", style="font-size:0.65rem;padding:0.05rem 0.3rem;margin-left:auto",
+            hx_target="#proposal-$slug", hx_swap="outerHTML",
+            script=script_path, dir=run_dir, slug,
+        )
         if isnothing(result)
             # Task running — stream from the .out file
             live_output = isfile(out_path) ? read(out_path, String) : ""
             h.div(class="mwe-panel")(
-                h.div(class="mwe-panel-header mwe-loading")("$label — running..."),
+                h.div(; class="mwe-panel-header mwe-loading", style="display:flex;align-items:center")(
+                    "$label — running...",
+                    rerun_btn,
+                ),
                 h.pre(; hx_get=@query_url(mwe_stream(; script=script_path, dir=run_dir, label)),
                     hx_trigger="every 2s", hx_swap="outerHTML",
+                    class="mwe-stream",
                 )(_html_escape(isempty(live_output) ? "Starting..." : live_output)),
             )
         else
             pass = result.exit_code == 0
-            # Extract timestamp from .out file
             ts = ""
             if isfile(out_path)
                 for line in eachline(out_path)
@@ -743,8 +805,9 @@ end
             end
             ts_label = isempty(ts) ? "" : " ($ts)"
             h.div(class="mwe-panel")(
-                h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
-                    "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label"
+                h.div(; class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")", style="display:flex;align-items:center")(
+                    "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label",
+                    rerun_btn,
                 ),
                 h.pre(_html_escape(result.output)),
             )
@@ -760,6 +823,7 @@ end
             live_output = isfile(out_path) ? read(out_path, String) : "Starting..."
             h.pre(; hx_get=@query_url(mwe_stream(; script, dir, label)),
                 hx_trigger="every 2s", hx_swap="outerHTML",
+                hx_on__after_settle="this.scrollTop = this.scrollHeight",
             )(_html_escape(live_output))
         else
             # Done — return final panel (no more polling)
@@ -781,14 +845,22 @@ end
         end
     end
 
-    _find_mwe_scripts(slug, proposals_path) = begin
+    _find_mwe_scripts(slug, proposals_path; worktree="") = begin
+        # Primary: look in <worktree>/mwe/
+        if !isempty(worktree)
+            mwe_dir = joinpath(worktree, "mwe")
+            if isdir(mwe_dir)
+                scripts = [f for f in readdir(mwe_dir; join=true) if endswith(f, ".jl")]
+                !isempty(scripts) && return scripts
+            end
+        end
+        # Fallback: look in proposals/<slug>/
         dir = dirname(proposals_path)
         isdir(dir) || return String[]
-        # Match <slug>.jl, <slug>-foo.jl, <slug>_bar.jl etc.
-        [f for f in readdir(dir; join=true) if endswith(f, ".jl") && startswith(basename(f), slug)]
+        [f for f in readdir(dir; join=true) if endswith(f, ".jl")]
     end
 
-    _render_single_mwe(script, worktree, main_dir) = begin
+    _render_single_mwe(script, worktree, main_dir; slug="") = begin
         sname = basename(script)
         main_result = isnothing(main_dir) ? nothing : _mwe_result(script, main_dir)
         worktree_result = _mwe_result(script, worktree)
@@ -805,12 +877,12 @@ end
             h.div(; style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem")(
                 h.strong(; style="font-size:0.85rem")(sname),
                 !show_panels ? post_form("/run_mwe";
-                    label="Run", btn_class="btn btn-approve", hx_target="#proposals-list", hx_swap="innerHTML",
-                    script, worktree,
+                    label="Run", btn_class="btn btn-approve", hx_target="#proposal-$slug", hx_swap="outerHTML",
+                    script, worktree, slug,
                 ) : "",
                 show_panels ? post_form("/rerun_mwe";
-                    label="Rerun", btn_class="btn", hx_target="#proposals-list", hx_swap="innerHTML",
-                    script, worktree,
+                    label="Rerun", btn_class="btn", hx_target="#proposal-$slug", hx_swap="outerHTML",
+                    script, worktree, slug,
                 ) : "",
             ),
             begin
@@ -822,14 +894,14 @@ end
                 )
             end,
             show_panels ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
-                !isnothing(main_dir) ? _render_mwe_panel("main", main_result, script, main_dir) : "",
-                _render_mwe_panel("worktree", worktree_result, script, worktree),
+                !isnothing(main_dir) ? _render_mwe_panel("main", main_result, script, main_dir; slug) : "",
+                _render_mwe_panel("worktree", worktree_result, script, worktree; slug),
             ) : "",
         )
     end
 
     _render_mwe(slug, worktree, proposals_path, status="pending") = begin
-        scripts = _find_mwe_scripts(slug, proposals_path)
+        scripts = _find_mwe_scripts(slug, proposals_path; worktree)
         isempty(scripts) && return ""
         main_dir = _repo_main_dir(worktree)
         any_results = any(scripts) do s
@@ -843,47 +915,56 @@ end
         mwe_details = should_open ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
         mwe_details(
             h.summary("MWE ($(length(scripts)) script$(length(scripts) == 1 ? "" : "s"))"),
-            [_render_single_mwe(s, worktree, main_dir) for s in scripts]...,
+            [_render_single_mwe(s, worktree, main_dir; slug) for s in scripts]...,
             # Run all button
             !any_results && length(scripts) > 1 ? post_form("/run_all_mwe";
-                label="Run All", btn_class="btn btn-approve", hx_target="#proposals-list", hx_swap="innerHTML",
+                label="Run All", btn_class="btn btn-approve", hx_target="#proposal-$slug", hx_swap="outerHTML",
                 slug, worktree, proposals_path,
             ) : "",
         )
     end
 
-    @post run_mwe(; script="", worktree="", _filter="all") = begin
+    _rerender_card(slug) = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return h.p("Not found: $slug")
+        _render_proposal(parse_proposal(path))
+    end
+
+    @post run_mwe(; script="", worktree="", slug="") = begin
         main_dir = _repo_main_dir(worktree)
         !isnothing(main_dir) && _mwe_result(script, main_dir)
         !isempty(worktree) && _mwe_result(script, worktree)
-        _render_list(_filter)
+        _rerender_card(slug)
     end
 
-    @post rerun_mwe(; script="", worktree="", _filter="all") = begin
+    @post rerun_mwe(; script="", worktree="", slug="") = begin
         main_dir = _repo_main_dir(worktree)
-        # Write marker files so streaming shows "Restarting..."
         for d in [main_dir, worktree]
             isnothing(d) && continue
             isempty(d) && continue
             p = _mwe_output_path(script, d)
             open(p, "w") do f; println(f, "# Restarting MWE..."); end
         end
-        # Evict cache + restart computation synchronously.
-        # fetchindex with force=true pops old entry and spawns a new Task internally,
-        # returning immediately. _render_list then sees in-progress Tasks → "running..." panels.
         !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
         !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        _render_list(_filter)
+        _rerender_card(slug)
     end
 
-    @post run_all_mwe(; slug="", worktree="", proposals_path="", _filter="all") = begin
-        scripts = _find_mwe_scripts(slug, proposals_path)
+    @post run_all_mwe(; slug="", worktree="", proposals_path="") = begin
+        scripts = _find_mwe_scripts(slug, proposals_path; worktree)
         for s in scripts
             main_dir = _repo_main_dir(worktree)
             !isnothing(main_dir) && _mwe_result(s, main_dir)
             !isempty(worktree) && _mwe_result(s, worktree)
         end
-        _render_list(_filter)
+        _rerender_card(slug)
+    end
+
+    @post rerun_mwe_single(; script="", dir="", slug="") = begin
+        p = _mwe_output_path(script, dir)
+        isfile(p) && open(p, "w") do f; println(f, "# Restarting MWE..."); end
+        fetchindex(_async_issues.mwe, script, dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        _rerender_card(slug)
     end
 
     _render_diff(worktree, status="pending") = begin
@@ -913,8 +994,12 @@ end
         end
     end
 
-    @get worktree_diff(; path="") = begin
+    @get worktree_diff(; path="", current_hash="") = begin
         isempty(path) && return h.span()("No worktree path")
+        # Only force re-fetch when polling with a hash (not on initial load)
+        if !isempty(current_hash)
+            fetchindex(_async_issues.diff, path; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        end
         diff_text = _worktree_diff(path)
         if isnothing(diff_text)
             h.span(; class="issue-loading",
@@ -923,10 +1008,19 @@ end
                 hx_swap="outerHTML",
             )("Loading diff...")
         else
+            new_hash = string(hash(diff_text))
+            # If hash unchanged, return 204 (HTMX skips swap, keeps polling)
+            !isempty(current_hash) && current_hash == new_hash && return HTTP.Response(204, [])
             nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
-            h.details(class="diff-viewer"; open="")(
-                h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
-                render_diff_html(diff_text),
+            h.div(; class="diff-poll-wrapper",
+                hx_get=@query_url(worktree_diff(; path, current_hash=new_hash)),
+                hx_trigger="every 10s",
+                hx_swap="outerHTML",
+            )(
+                h.details(class="diff-viewer"; open="")(
+                    h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
+                    render_diff_html(diff_text),
+                ),
             )
         end
     end
@@ -946,16 +1040,15 @@ end
     end
 
     _render_proposal(p) = begin
-        fname = basename(p.path)
-        slug = replace(fname, ".md" => "")
+        slug = basename(dirname(p.path))
         status = get(p.yaml, "status", "pending")
         issue = get(p.yaml, "issue", "")
         pr = get(p.yaml, "pr", "")
         pr = pr in ("null", "") ? nothing : pr
         worktree = get(p.yaml, "worktree", "")
         body_html = Markdown.html(Markdown.parse(p.body))
-        # Derive repo name from path: .../RepoName/proposals/slug.md
-        repo_name = basename(dirname(dirname(p.path)))
+        # Derive repo name from path: .../RepoName/proposals/<slug>/proposal.md
+        repo_name = basename(dirname(dirname(dirname(p.path))))
 
         p.yaml["_path"] = p.path
         comments = parse_comments(p.yaml)
@@ -1029,13 +1122,13 @@ end
                 h.div(class="proposal-header")(
                     h.div(class="proposal-title")(
                         h.span(; style="font-size:0.75em;color:#666;font-weight:400;margin-right:0.5em")(repo_name),
-                        h.a(; href="/proposal/$slug")(fname),
+                        h.a(; href="/proposal/$slug")(slug),
                     ),
                     h.div(; style="display:flex;align-items:center;gap:0.5rem")(
                         h.button(; class="btn", style="font-size:0.7rem;padding:0.1rem 0.4rem",
                             hx_post="/refresh_card/$slug",
-                            hx_target="#proposals-list",
-                            hx_swap="innerHTML",
+                            hx_target="#proposal-$slug",
+                            hx_swap="outerHTML",
                             onclick="event.stopPropagation()",
                         )("↻"),
                         status_badge(status),
@@ -1052,21 +1145,19 @@ end
                         [h.div(class="comment")(c) for c in comments]...,
                     ) : "",
                     h.div(class="actions")(
-                        h.div(class="actions-row")(action_buttons...),
                         h.div(class="actions-row")(
-                            post_form("/add_comment/$slug",
-                                h.input(; type="text", name="msg", id="comment-input-$slug",
-                                    placeholder="Add a note...");
-                                label="Comment", form_class="comment-form",
+                            action_buttons...,
+                            !isempty(worktree) ? post_form("/push_branch/$slug";
+                                label="Push", btn_class="btn",
                                 hx_target="#proposals-list", hx_swap="innerHTML",
-                            ),
+                            ) : "",
                         ),
                         h.div(class="actions-row")(quick_buttons...),
                     ),
                 ),
                 # Right column — issue discussion + PR discussion
                 h.div(class="card-right")(
-                    !isempty(issue) ? _render_discussion(issue) : "",
+                    !isempty(issue) && issue != pr ? _render_discussion(issue) : "",
                     !isnothing(pr) ? h.div(; style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid #d0d7de")(
                         h.div(; style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem")(
                             "Pull Request ",
@@ -1075,8 +1166,16 @@ end
                         _render_discussion(pr),
                     ) : "",
                 ),
-                # Footer — PR form + diff spans full width
+                # Footer — comment form + PR form + diff spans full width
                 h.div(class="card-footer")(
+                    h.div(class="comment-form-sticky")(
+                        post_form("/add_comment/$slug",
+                            h.textarea(; name="msg", id="comment-input-$slug",
+                                placeholder="Add a note... (Ctrl+Enter to send)", rows="3");
+                            label="Comment", form_class="comment-form",
+                            hx_target="#proposals-list", hx_swap="innerHTML",
+                        ),
+                    ),
                     h.div(; id="pr-form-$slug")(),
                     !isempty(worktree) ? h.div()(
                         _render_mwe(slug, worktree, p.path, status),
@@ -1174,6 +1273,10 @@ end
                 highlightCode();
                 document.body.addEventListener('htmx:afterSettle', function(evt) {
                     highlightCode();
+                    // Auto-scroll MWE streaming output to bottom
+                    document.querySelectorAll('pre.mwe-stream').forEach(function(el) {
+                        el.scrollTop = el.scrollHeight;
+                    });
                     // Only flash after user actions (POST), not background polling (GET)
                     var verb = evt.detail && evt.detail.requestConfig && evt.detail.requestConfig.verb;
                     if (verb === 'post') {
@@ -1188,6 +1291,23 @@ end
                 document.body.addEventListener('toggle', function(e) {
                     if (e.target.open) setTimeout(highlightCode, 10);
                 }, true);
+                // Ctrl/Shift highlights focused textarea as "ready to send"
+                document.body.addEventListener('keydown', function(e) {
+                    if (e.target.tagName === 'TEXTAREA' && (e.ctrlKey || e.shiftKey)) {
+                        e.target.classList.add('ready-to-send');
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            e.target.classList.remove('ready-to-send');
+                            var form = e.target.closest('form');
+                            if (form) htmx.trigger(form, 'submit');
+                        }
+                    }
+                });
+                document.body.addEventListener('keyup', function(e) {
+                    if (e.target.tagName === 'TEXTAREA') {
+                        e.target.classList.remove('ready-to-send');
+                    }
+                });
             """),
         );
         htmx_version="2.0.8", hyperscript_version=nothing, pico_version=nothing,
@@ -1223,6 +1343,14 @@ end
         path = _find_proposal(slug)
         isnothing(path) && return h.p("Not found: $slug")
         p = parse_proposal(path)
+        # Evict caches so we get fresh data
+        issue = get(p.yaml, "issue", "")
+        pr_val = get(p.yaml, "pr", "")
+        pr_val = pr_val in ("null", "") ? nothing : pr_val
+        worktree = get(p.yaml, "worktree", "")
+        !isempty(issue) && fetchindex(_async_issues.discussion, issue; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isnothing(pr_val) && fetchindex(_async_issues.discussion, pr_val; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isempty(worktree) && fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
         content = h.div()(
             h.h1("Issue Review ", h.small("proposals → review → PR")),
             h.div(class="nav-links")(
@@ -1280,8 +1408,10 @@ end
         for rd in repo_dirs()
             pdir = joinpath(rd, "proposals")
             isdir(pdir) || continue
-            for f in readdir(pdir; join=true)
-                endswith(f, ".md") && push!(files, f)
+            for d in readdir(pdir; join=true)
+                isdir(d) || continue
+                pf = joinpath(d, "proposal.md")
+                isfile(pf) && push!(files, pf)
             end
         end
         sort!(files)
@@ -1368,7 +1498,7 @@ end
 
     _find_proposal(slug) = begin
         for rd in repo_dirs()
-            path = joinpath(rd, "proposals", "$slug.md")
+            path = joinpath(rd, "proposals", slug, "proposal.md")
             isfile(path) && return path
         end
         nothing
@@ -1387,9 +1517,7 @@ end
         !isnothing(pr_val) && fetchindex(_async_issues.discussion, pr_val; force=true) do rv, _; rv isa Task ? nothing : rv; end
         !isempty(worktree) && fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
         @info "REFRESH_CARD evicted caches for $slug"
-        # Re-render just the card body — need to call _render_proposal and extract the card-body
-        # Simpler: re-render the whole list
-        _render_list("all")
+        _render_proposal(p)
     end
 
     _do_respond(slug, new_status, msg, _filter) = begin
@@ -1412,7 +1540,7 @@ end
     # --- PR creation ---
 
     _generate_pr_body_claude(p) = begin
-        slug = replace(basename(p.path), ".md" => "")
+        slug = basename(dirname(p.path))
         issue = get(p.yaml, "issue", "")
         worktree = get(p.yaml, "worktree", "")
         lines = String[]
@@ -1422,9 +1550,11 @@ end
         push!(lines, "")
 
         # MWE section
-        scripts = _find_mwe_scripts(slug, p.path)
+        scripts = _find_mwe_scripts(slug, p.path; worktree)
         if !isempty(scripts)
             push!(lines, "## MWE")
+            push!(lines, "")
+            push!(lines, "> **Note:** MWE scripts are committed to the `mwe/` directory on this branch but are removed in the final commit (so they won't be included after squash merge). To run them locally, check out the penultimate commit: `git checkout HEAD~1 -- mwe/`")
             push!(lines, "")
             for script in scripts
                 sname = basename(script)
@@ -1457,12 +1587,16 @@ end
     end
 
     _generate_pr_title(p) = begin
-        # Extract a short title from the proposal filename or first heading
-        slug = replace(basename(p.path), ".md" => "")
+        slug = basename(dirname(p.path))
         issue_num = match(r"^(\d+)", slug)
-        # Try to get title from first ## heading in body
-        title_m = match(r"^##\s+(.+)"m, p.body)
-        title = isnothing(title_m) ? replace(slug, "-" => " ") : title_m.captures[1]
+        # Prefer title from YAML front matter
+        title = get(p.yaml, "title", nothing)
+        if isnothing(title) || title in ("null", "")
+            # Fallback: humanize slug
+            name_part = isnothing(issue_num) ? slug : replace(slug, r"^\d+-?" => "")
+            title = replace(name_part, "-" => " ", "_" => " ")
+            title = uppercase(title[1]) * title[2:end]
+        end
         isnothing(issue_num) ? title : "Fix #$(issue_num.captures[1]): $title"
     end
 
@@ -1601,6 +1735,68 @@ end
         join(body_parts, "\n")
     end
 
+    _push_with_mwe_cleanup(worktree, branch) = begin
+        result_msg = ""
+        mwe_dir = joinpath(worktree, "mwe")
+        has_mwe = isdir(mwe_dir) && !isempty(readdir(mwe_dir))
+        try
+            # Push the branch (including mwe/ if committed)
+            push_cmd = `git push origin HEAD:refs/heads/$branch`
+            @info "PUSH push cmd" push_cmd worktree
+            push_output = read(pipeline(setenv(push_cmd; dir=worktree); stderr=stdout), String)
+            @info "PUSH push done" push_output
+            # Verify branch exists on remote
+            verify = strip(read(setenv(`git ls-remote origin refs/heads/$branch`; dir=worktree), String))
+            if isempty(verify)
+                result_msg = "Warning: git push appeared to succeed but branch not found on remote\n"
+                @warn "PUSH verification failed" branch
+                return result_msg
+            end
+            # Clean up mwe/ if it was committed
+            if has_mwe
+                # Check if mwe/ is tracked by git
+                tracked = try
+                    run(setenv(`git ls-files --error-unmatch mwe`; dir=worktree); wait=true)
+                    true
+                catch
+                    false
+                end
+                if tracked
+                    @info "PUSH cleaning up mwe/" worktree
+                    run(setenv(`git rm -rf mwe`; dir=worktree); wait=true)
+                    run(setenv(`git commit -m "Clean up MWE"`; dir=worktree); wait=true)
+                    cleanup_output = read(pipeline(setenv(`git push origin HEAD:refs/heads/$branch`; dir=worktree); stderr=stdout), String)
+                    @info "PUSH cleanup pushed" cleanup_output
+                    # Restore mwe/ locally
+                    parent = strip(read(pipeline(setenv(Cmd(["git", "rev-parse", "HEAD~1"]); dir=worktree); stderr=stdout), String))
+                    run(setenv(`git checkout $parent -- mwe`; dir=worktree); wait=true)
+                    @info "PUSH mwe/ restored locally"
+                end
+            end
+        catch e
+            @info "PUSH failed" sprint(showerror, e)
+            result_msg = "Warning: push failed: $(sprint(showerror, e))\n"
+        end
+        result_msg
+    end
+
+    @post push_branch(slug; _filter="all") = begin
+        path = _find_proposal(slug)
+        isnothing(path) && return h.p("Not found: $slug")
+        p = parse_proposal(path)
+        worktree = get(p.yaml, "worktree", "")
+        isempty(worktree) && return h.p("No worktree for $slug")
+        # Detect branch name from worktree
+        branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
+        result_msg = _push_with_mwe_cleanup(worktree, branch)
+        if isempty(result_msg)
+            add_comment!(path, "Pushed branch $branch")
+        else
+            add_comment!(path, result_msg)
+        end
+        _render_list(_filter)
+    end
+
     @post create_pr(slug; pr_title="", human_comment="", claude_body="", repo_slug="", worktree="", branch="", existing_pr="") = begin
         @info "CREATE_PR" slug pr_title existing_pr repo_slug branch worktree length(claude_body)
         path = _find_proposal(slug)
@@ -1611,23 +1807,10 @@ end
         full_body = _build_pr_body(human_comment, claude_body)
         @info "CREATE_PR step 2: body built" length(full_body)
 
-        # Push branch if needed (skip for updates — branch already on remote)
+        # Push branch with MWE cleanup
         result_msg = ""
-        if !is_update && !isempty(worktree) && isdir(worktree)
-            @info "CREATE_PR pushing branch" branch
-            try
-                proc = run(pipeline(setenv(`git push -u origin $branch`; dir=worktree); stdout=devnull, stderr=devnull); wait=false)
-                # Timeout after 30 seconds
-                t = Timer(30)
-                @async begin; wait(t); process_running(proc) && kill(proc); end
-                wait(proc)
-                close(t)
-                @info "CREATE_PR push done" proc.exitcode
-                proc.exitcode != 0 && (result_msg = "Warning: git push exited with $(proc.exitcode)\n")
-            catch e
-                @info "CREATE_PR push failed" sprint(showerror, e)
-                result_msg = "Warning: git push failed: $(sprint(showerror, e))\n"
-            end
+        if !is_update && !isempty(worktree) && isdir(worktree) && !isempty(repo_slug)
+            result_msg = _push_with_mwe_cleanup(worktree, branch)
         end
 
         @info "CREATE_PR step 4: is_update=$is_update"
@@ -1657,7 +1840,9 @@ end
             try
                 body_file = tempname()
                 write(body_file, full_body)
-                pr_url = strip(read(setenv(`gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $branch`; dir=worktree), String))
+                gh_cmd = `gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $branch`
+                @info "CREATE_PR gh pr create" gh_cmd
+                pr_url = strip(read(setenv(gh_cmd; dir=worktree), String))
                 rm(body_file; force=true)
                 update_yaml!(path, "pr", pr_url)
                 update_yaml!(path, "status", "pr-open")
