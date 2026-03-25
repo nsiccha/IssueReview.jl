@@ -365,7 +365,12 @@ function parse_proposal(path)
     for line in eachline(IOBuffer(yaml_str))
         km = match(r"^(\w+):\s*(.*)", line)
         isnothing(km) && continue
-        yaml[km.captures[1]] = strip(km.captures[2])
+        val = strip(km.captures[2])
+        # Strip surrounding quotes from YAML values
+        if length(val) >= 2 && val[1] in ('"', '\'') && val[end] == val[1]
+            val = val[2:end-1]
+        end
+        yaml[km.captures[1]] = val
     end
     (; yaml, body, raw=content, path)
 end
@@ -472,6 +477,10 @@ end
 
 function _html_escape(s)
     replace(s, "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
+end
+
+function _linkify(s)
+    replace(_html_escape(s), r"https?://[^\s<>\"')]*[^\s<>\"').,:;!?]" => m -> "<a href=\"$m\" target=\"_blank\">$m</a>")
 end
 
 function _prism_lang(filename)
@@ -846,18 +855,10 @@ end
     end
 
     _find_mwe_scripts(slug, proposals_path; worktree="") = begin
-        # Primary: look in <worktree>/mwe/
-        if !isempty(worktree)
-            mwe_dir = joinpath(worktree, "mwe")
-            if isdir(mwe_dir)
-                scripts = [f for f in readdir(mwe_dir; join=true) if endswith(f, ".jl")]
-                !isempty(scripts) && return scripts
-            end
-        end
-        # Fallback: look in proposals/<slug>/
-        dir = dirname(proposals_path)
-        isdir(dir) || return String[]
-        [f for f in readdir(dir; join=true) if endswith(f, ".jl")]
+        isempty(worktree) && return String[]
+        mwe_dir = joinpath(worktree, "mwe")
+        isdir(mwe_dir) || return String[]
+        [f for f in readdir(mwe_dir; join=true) if endswith(f, ".jl")]
     end
 
     _render_single_mwe(script, worktree, main_dir; slug="") = begin
@@ -996,21 +997,11 @@ end
 
     @get worktree_diff(; path="", current_hash="") = begin
         isempty(path) && return h.span()("No worktree path")
-        # Only force re-fetch when polling with a hash (not on initial load)
         if !isempty(current_hash)
-            fetchindex(_async_issues.diff, path; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        end
-        diff_text = _worktree_diff(path)
-        if isnothing(diff_text)
-            h.span(; class="issue-loading",
-                hx_get=@query_url(worktree_diff(; path)),
-                hx_trigger="every 2s",
-                hx_swap="outerHTML",
-            )("Loading diff...")
-        else
+            # Polling: fetch fresh diff directly (fast, ~10ms) and compare
+            diff_text = _fetch_worktree_diff(path)
             new_hash = string(hash(diff_text))
-            # If hash unchanged, return 204 (HTMX skips swap, keeps polling)
-            !isempty(current_hash) && current_hash == new_hash && return HTTP.Response(204, [])
+            current_hash == new_hash && return HTTP.Response(204, [])
             nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
             h.div(; class="diff-poll-wrapper",
                 hx_get=@query_url(worktree_diff(; path, current_hash=new_hash)),
@@ -1022,6 +1013,29 @@ end
                     render_diff_html(diff_text),
                 ),
             )
+        else
+            # Initial load: use async cache
+            diff_text = _worktree_diff(path)
+            if isnothing(diff_text)
+                h.span(; class="issue-loading",
+                    hx_get=@query_url(worktree_diff(; path)),
+                    hx_trigger="every 2s",
+                    hx_swap="outerHTML",
+                )("Loading diff...")
+            else
+                new_hash = string(hash(diff_text))
+                nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
+                h.div(; class="diff-poll-wrapper",
+                    hx_get=@query_url(worktree_diff(; path, current_hash=new_hash)),
+                    hx_trigger="every 10s",
+                    hx_swap="outerHTML",
+                )(
+                    h.details(class="diff-viewer"; open="")(
+                        h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
+                        render_diff_html(diff_text),
+                    ),
+                )
+            end
         end
     end
 
@@ -1142,7 +1156,7 @@ end
                     h.div(class="proposal-body")(body_html),
                     !isempty(comments) ? h.div(class="comments")(
                         h.strong("Comments:"),
-                        [h.div(class="comment")(c) for c in comments]...,
+                        [h.div(class="comment")(_linkify(c)) for c in comments]...,
                     ) : "",
                     h.div(class="actions")(
                         h.div(class="actions-row")(
@@ -1154,6 +1168,7 @@ end
                         ),
                         h.div(class="actions-row")(quick_buttons...),
                     ),
+                    h.div(; id="pr-form-$slug")(),
                 ),
                 # Right column — issue discussion + PR discussion
                 h.div(class="card-right")(
@@ -1176,7 +1191,6 @@ end
                             hx_target="#proposals-list", hx_swap="innerHTML",
                         ),
                     ),
-                    h.div(; id="pr-form-$slug")(),
                     !isempty(worktree) ? h.div()(
                         _render_mwe(slug, worktree, p.path, status),
                         _render_diff(worktree, status),
@@ -1554,7 +1568,16 @@ end
         if !isempty(scripts)
             push!(lines, "## MWE")
             push!(lines, "")
-            push!(lines, "> **Note:** MWE scripts are committed to the `mwe/` directory on this branch but are removed in the final commit (so they won't be included after squash merge). To run them locally, check out the penultimate commit: `git checkout HEAD~1 -- mwe/`")
+            # Find the last commit containing mwe/ and link to it
+            mwe_commit = try
+                strip(read(setenv(Cmd(["git", "log", "--all", "--format=%H", "-1", "--", "mwe/"]); dir=worktree), String))
+            catch; "" end
+            repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
+            mwe_repo = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
+            mwe_link = !isempty(mwe_commit) && !isempty(mwe_repo) ?
+                "[commit with MWE](https://github.com/$mwe_repo/commit/$mwe_commit)" :
+                "the penultimate commit"
+            push!(lines, "> **Note:** MWE scripts are committed to the `mwe/` directory on this branch but are removed in the final commit (so they won't be included after squash merge). To check out the MWE locally: `git checkout $(!isempty(mwe_commit) ? mwe_commit[1:10] : "HEAD~1") -- mwe/` ($mwe_link)")
             push!(lines, "")
             for script in scripts
                 sname = basename(script)
@@ -1735,26 +1758,65 @@ end
         join(body_parts, "\n")
     end
 
-    _push_with_mwe_cleanup(worktree, branch) = begin
+    # Determine push target: direct to origin if we have push access, otherwise fork
+    _resolve_push_target(repo_slug, worktree) = begin
+        # Check if we have push access to the upstream repo
+        can_push = try
+            perms = strip(read(`gh api repos/$repo_slug --jq .permissions.push`, String))
+            perms == "true"
+        catch
+            false
+        end
+        if can_push
+            @info "PUSH target: direct to $repo_slug"
+            return (; remote="origin", head_prefix="", fork_slug="")
+        end
+        # Need a fork — create one if it doesn't exist
+        gh_user = strip(read(`gh api user --jq .login`, String))
+        fork_slug = "$gh_user/$(split(repo_slug, '/')[2])"
+        @info "PUSH target: fork $fork_slug"
+        try
+            # Check if fork exists
+            read(`gh api repos/$fork_slug --jq .full_name`, String)
+        catch
+            # Create fork
+            @info "PUSH creating fork of $repo_slug"
+            read(`gh repo fork $repo_slug --clone=false`, String)
+            sleep(2)  # Give GitHub a moment
+        end
+        # Ensure fork remote exists in worktree (use SSH to avoid credential prompts)
+        remotes = read(setenv(`git remote`; dir=worktree), String)
+        if !contains(remotes, "fork")
+            fork_url = "git@github.com:$fork_slug.git"
+            run(setenv(`git remote add fork $fork_url`; dir=worktree); wait=true)
+            @info "PUSH added fork remote" fork_url
+        end
+        (; remote="fork", head_prefix="$gh_user:", fork_slug)
+    end
+
+    _push_with_mwe_cleanup(worktree, branch; repo_slug="") = begin
         result_msg = ""
         mwe_dir = joinpath(worktree, "mwe")
         has_mwe = isdir(mwe_dir) && !isempty(readdir(mwe_dir))
         try
+            # Resolve push target (direct or fork)
+            target = !isempty(repo_slug) ? _resolve_push_target(repo_slug, worktree) : (; remote="origin", head_prefix="", fork_slug="")
+            remote = target.remote
+
             # Push the branch (including mwe/ if committed)
-            push_cmd = `git push origin HEAD:refs/heads/$branch`
-            @info "PUSH push cmd" push_cmd worktree
+            push_cmd = `git push $remote HEAD:refs/heads/$branch`
+            @info "PUSH push cmd" push_cmd worktree remote
             push_output = read(pipeline(setenv(push_cmd; dir=worktree); stderr=stdout), String)
             @info "PUSH push done" push_output
             # Verify branch exists on remote
-            verify = strip(read(setenv(`git ls-remote origin refs/heads/$branch`; dir=worktree), String))
+            verify = strip(read(setenv(`git ls-remote $remote refs/heads/$branch`; dir=worktree), String))
             if isempty(verify)
                 result_msg = "Warning: git push appeared to succeed but branch not found on remote\n"
-                @warn "PUSH verification failed" branch
-                return result_msg
+                @warn "PUSH verification failed" branch remote
+                return (; result_msg, head_prefix=target.head_prefix)
             end
             # Clean up mwe/ if it was committed
             if has_mwe
-                # Check if mwe/ is tracked by git
                 tracked = try
                     run(setenv(`git ls-files --error-unmatch mwe`; dir=worktree); wait=true)
                     true
@@ -1765,7 +1827,7 @@ end
                     @info "PUSH cleaning up mwe/" worktree
                     run(setenv(`git rm -rf mwe`; dir=worktree); wait=true)
                     run(setenv(`git commit -m "Clean up MWE"`; dir=worktree); wait=true)
-                    cleanup_output = read(pipeline(setenv(`git push origin HEAD:refs/heads/$branch`; dir=worktree); stderr=stdout), String)
+                    cleanup_output = read(pipeline(setenv(`git push $remote HEAD:refs/heads/$branch`; dir=worktree); stderr=stdout), String)
                     @info "PUSH cleanup pushed" cleanup_output
                     # Restore mwe/ locally
                     parent = strip(read(pipeline(setenv(Cmd(["git", "rev-parse", "HEAD~1"]); dir=worktree); stderr=stdout), String))
@@ -1773,11 +1835,11 @@ end
                     @info "PUSH mwe/ restored locally"
                 end
             end
+            (; result_msg, head_prefix=target.head_prefix)
         catch e
             @info "PUSH failed" sprint(showerror, e)
-            result_msg = "Warning: push failed: $(sprint(showerror, e))\n"
+            (; result_msg="Warning: push failed: $(sprint(showerror, e))\n", head_prefix="")
         end
-        result_msg
     end
 
     @post push_branch(slug; _filter="all") = begin
@@ -1786,13 +1848,15 @@ end
         p = parse_proposal(path)
         worktree = get(p.yaml, "worktree", "")
         isempty(worktree) && return h.p("No worktree for $slug")
-        # Detect branch name from worktree
+        issue = get(p.yaml, "issue", "")
+        repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
+        repo_slug = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
         branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
-        result_msg = _push_with_mwe_cleanup(worktree, branch)
-        if isempty(result_msg)
+        result = _push_with_mwe_cleanup(worktree, branch; repo_slug)
+        if isempty(result.result_msg)
             add_comment!(path, "Pushed branch $branch")
         else
-            add_comment!(path, result_msg)
+            add_comment!(path, result.result_msg)
         end
         _render_list(_filter)
     end
@@ -1809,8 +1873,11 @@ end
 
         # Push branch with MWE cleanup
         result_msg = ""
+        head_prefix = ""
         if !is_update && !isempty(worktree) && isdir(worktree) && !isempty(repo_slug)
-            result_msg = _push_with_mwe_cleanup(worktree, branch)
+            push_result = _push_with_mwe_cleanup(worktree, branch; repo_slug)
+            result_msg = push_result.result_msg
+            head_prefix = push_result.head_prefix
         end
 
         @info "CREATE_PR step 4: is_update=$is_update"
@@ -1840,7 +1907,8 @@ end
             try
                 body_file = tempname()
                 write(body_file, full_body)
-                gh_cmd = `gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $branch`
+                head_ref = head_prefix * branch
+                gh_cmd = `gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $head_ref`
                 @info "CREATE_PR gh pr create" gh_cmd
                 pr_url = strip(read(setenv(gh_cmd; dir=worktree), String))
                 rm(body_file; force=true)
