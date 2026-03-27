@@ -312,7 +312,7 @@ _default_responses() = [
     Dict("label"=>"Revise", "status"=>"changes-requested", "comment"=>"", "style"=>"changes", "confirm"=>false, "prompt"=>true),
     Dict("label"=>"Reject", "status"=>"rejected", "comment"=>"REJECTED. Do not pursue this issue. Do not open a PR.", "style"=>"reject", "confirm"=>true, "prompt"=>false),
     Dict("label"=>"Skip", "status"=>"skipped", "comment"=>"SKIPPED. Move on to the next issue. Do not spend more time on this.", "style"=>"skip", "confirm"=>false, "prompt"=>false),
-    Dict("label"=>"Reset", "status"=>"pending", "comment"=>"", "style"=>"", "confirm"=>true, "prompt"=>false),
+    Dict("label"=>"Reset", "status"=>"review", "comment"=>"", "style"=>"", "confirm"=>true, "prompt"=>false),
 ]
 
 _default_quick_comments() = [
@@ -459,16 +459,20 @@ function parse_comments(yaml)
 end
 
 function status_badge(status)
-    color = if status in ("open-pr", "approved")
-        "#2da44e"
-    elseif status == "rejected"
-        "#cf222e"
+    color = if status == "review"
+        "#0969da"
     elseif status == "changes-requested"
         "#d29922"
-    elseif status == "pr-open"
-        "#8250df"
+    elseif status == "rejected"
+        "#cf222e"
     elseif status == "skipped"
         "#666"
+    elseif status == "pr-draft"
+        "#8250df"
+    elseif status == "pr-open"
+        "#2da44e"
+    elseif status == "pr-merged"
+        "#8250df"
     else
         "#888"
     end
@@ -608,12 +612,13 @@ end
     h1 { margin-bottom: 1.5rem; }
     h1 small { font-weight: 400; font-size: 0.6em; color: #666; }
     .proposal-card { background: white; border: 1px solid #d0d7de; border-radius: 6px; padding: 1.5rem; margin-bottom: 1rem; border-left: 4px solid #d0d7de; }
-    .proposal-card.status-pending { border-left-color: #888; }
-    .proposal-card.status-open-pr { border-left-color: #2da44e; }
-    .proposal-card.status-pr-open { border-left-color: #8250df; }
-    .proposal-card.status-approved { border-left-color: #2da44e; }
+    .proposal-card.status-review { border-left-color: #0969da; }
     .proposal-card.status-changes-requested { border-left-color: #d29922; }
     .proposal-card.status-rejected { border-left-color: #cf222e; }
+    .proposal-card.status-skipped { border-left-color: #666; }
+    .proposal-card.status-pr-draft { border-left-color: #8250df; }
+    .proposal-card.status-pr-open { border-left-color: #2da44e; }
+    .proposal-card.status-pr-merged { border-left-color: #8250df; }
     .proposal-card.status-skipped { border-left-color: #666; }
     .proposal-card > summary { cursor: pointer; list-style: none; }
     .proposal-card > summary::-webkit-details-marker { display: none; }
@@ -901,7 +906,7 @@ end
         )
     end
 
-    _render_mwe(slug, worktree, proposals_path, status="pending") = begin
+    _render_mwe(slug, worktree, proposals_path, status="review") = begin
         scripts = _find_mwe_scripts(slug, proposals_path; worktree)
         isempty(scripts) && return ""
         main_dir = _repo_main_dir(worktree)
@@ -911,7 +916,7 @@ end
             !isnothing(r1) || !isnothing(r2)
         end
 
-        closed_statuses = ("approved", "rejected", "skipped")
+        closed_statuses = ("rejected", "skipped", "pr-merged")
         should_open = status ∉ closed_statuses
         mwe_details = should_open ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
         mwe_details(
@@ -968,14 +973,14 @@ end
         _rerender_card(slug)
     end
 
-    _render_diff(worktree, status="pending") = begin
+    _render_diff(worktree, status="review") = begin
         diff_text = _worktree_diff(worktree)
         # Auto-refresh stale diffs (cached from old code or empty)
         if !isnothing(diff_text) && startswith(diff_text, "(")
             fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
             diff_text = nothing  # show loading state
         end
-        closed_statuses = ("approved", "rejected", "skipped")
+        closed_statuses = ("rejected", "skipped", "pr-merged")
         should_open = status ∉ closed_statuses
         if isnothing(diff_text)
             h.div(class="diff-viewer")(
@@ -1053,12 +1058,56 @@ end
         )
     end
 
+    # Query GitHub PR state; returns "draft", "open", "merged", "closed", or ""
+    _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, state)
+    _pr_github_state(pr_url) = begin
+        isnothing(pr_url) && return ""
+        # Cache for 60 seconds
+        if haskey(_pr_state_cache, pr_url)
+            ts, state = _pr_state_cache[pr_url]
+            time() - ts < 60 && return state
+        end
+        state = try
+            pr_m = match(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_url)
+            isnothing(pr_m) && return ""
+            repo, num = pr_m.captures
+            raw = strip(read(`gh pr view $num --repo $repo --json state,isDraft --jq '.state + (if .isDraft then ":draft" else "" end)'`, String))
+            if contains(raw, "MERGED")
+                "merged"
+            elseif contains(raw, "CLOSED")
+                "closed"
+            elseif contains(raw, "draft")
+                "draft"
+            else
+                "open"
+            end
+        catch
+            ""
+        end
+        _pr_state_cache[pr_url] = (time(), state)
+        state
+    end
+
+    _effective_status(yaml_status, pr_url) = begin
+        # GitHub-derived statuses override local status when a PR exists
+        if !isnothing(pr_url) && !isempty(something(pr_url, ""))
+            gh_state = _pr_github_state(pr_url)
+            gh_state == "merged" && return "pr-merged"
+            gh_state == "draft" && yaml_status ∉ ("changes-requested",) && return "pr-draft"
+            gh_state == "open" && yaml_status ∉ ("changes-requested",) && return "pr-open"
+        end
+        # Map old statuses to new ones
+        yaml_status in ("pending", "pr-open") ? "review" : yaml_status
+    end
+
     _render_proposal(p) = begin
         slug = basename(dirname(p.path))
-        status = get(p.yaml, "status", "pending")
+        yaml_status = get(p.yaml, "status", "review")
+        pr_val = get(p.yaml, "pr", "")
+        pr_val_parsed = pr_val in ("null", "") ? nothing : pr_val
+        status = _effective_status(yaml_status, pr_val_parsed)
+        pr = pr_val_parsed
         issue = get(p.yaml, "issue", "")
-        pr = get(p.yaml, "pr", "")
-        pr = pr in ("null", "") ? nothing : pr
         worktree = get(p.yaml, "worktree", "")
         body_html = Markdown.html(Markdown.parse(p.body))
         # Derive repo name from path: .../RepoName/proposals/<slug>/proposal.md
@@ -1075,7 +1124,7 @@ end
         # Build action buttons from config
         action_buttons = map(_responses()) do resp
             label = get(resp, "label", "?")
-            new_status = get(resp, "status", "pending")
+            new_status = get(resp, "status", "review")
             cmt = get(resp, "comment", "")
             style = get(resp, "style", "")
             confirm = get(resp, "confirm", false)
@@ -1200,16 +1249,22 @@ end
         )
     end
 
+    _proposal_effective_status(p) = begin
+        pr_val = get(p.yaml, "pr", "")
+        pr_parsed = pr_val in ("null", "") ? nothing : pr_val
+        _effective_status(get(p.yaml, "status", "review"), pr_parsed)
+    end
+
     _render_list(filter_val) = begin
         ps = proposals
         if filter_val != "all"
-            ps = [p for p in ps if get(p.yaml, "status", "pending") == filter_val]
+            ps = [p for p in ps if _proposal_effective_status(p) == filter_val]
         end
 
-        all_statuses = ["all", "pending", "open-pr", "pr-open", "approved", "changes-requested", "rejected", "skipped"]
+        all_statuses = ["all", "review", "changes-requested", "pr-draft", "pr-open", "pr-merged", "rejected", "skipped"]
         filter_links_list = []
         for f in all_statuses
-            n = f == "all" ? length(proposals) : count(p -> get(p.yaml, "status", "pending") == f, proposals)
+            n = f == "all" ? length(proposals) : count(p -> _proposal_effective_status(p) == f, proposals)
             (n == 0 && f != "all" && f != filter_val) && continue
             push!(filter_links_list, h.a(;
                 href=@query_url(index(; filter=f)),
@@ -1913,7 +1968,7 @@ end
                 pr_url = strip(read(setenv(gh_cmd; dir=worktree), String))
                 rm(body_file; force=true)
                 update_yaml!(path, "pr", pr_url)
-                update_yaml!(path, "status", "pr-open")
+                update_yaml!(path, "status", "review")
                 add_comment!(path, "Draft PR created: $pr_url")
                 result_msg *= "Draft PR created: $pr_url"
             catch e
