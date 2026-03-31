@@ -5,6 +5,8 @@ using IssueReview
 using Markdown
 using Dates
 using JSON
+using YAML
+using OrderedCollections: OrderedDict
 
 proposals_dir() = IssueReview.proposals_dir()
 config_dir() = IssueReview.issues_root()
@@ -356,21 +358,22 @@ end
 
 # --- Proposal parsing ---
 
+function _split_frontmatter(content)
+    m = match(r"^---\n(.*?)\n---\n(.*)"s, content)
+    isnothing(m) && return (nothing, content)
+    m.captures
+end
+
 function parse_proposal(path)
     content = read(path, String)
-    m = match(r"^---\n(.*?)\n---\n(.*)"s, content)
-    isnothing(m) && return (; yaml=Dict{String,String}(), body=content, raw=content, path)
-    yaml_str, body = m.captures
-    yaml = Dict{String,String}()
-    for line in eachline(IOBuffer(yaml_str))
-        km = match(r"^(\w+):\s*(.*)", line)
-        isnothing(km) && continue
-        val = strip(km.captures[2])
-        # Strip surrounding quotes from YAML values
-        if length(val) >= 2 && val[1] in ('"', '\'') && val[end] == val[1]
-            val = val[2:end-1]
-        end
-        yaml[km.captures[1]] = val
+    yaml_str, body = _split_frontmatter(content)
+    if isnothing(yaml_str)
+        return (; yaml=OrderedDict{String,Any}(), body=content, raw=content, path)
+    end
+    yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
+    # Normalize scalar nothings (YAML null) to "" for compatibility
+    for (k, v) in yaml
+        v isa Nothing && (yaml[k] = "")
     end
     (; yaml, body, raw=content, path)
 end
@@ -391,71 +394,35 @@ function list_proposals()
     [parse_proposal(f) for f in files]
 end
 
+function _write_frontmatter!(path, yaml, body)
+    buf = IOBuffer()
+    YAML.write(buf, yaml)
+    write(path, "---\n" * String(take!(buf)) * "---\n" * body)
+end
+
 function update_yaml!(path, key, value)
     content = read(path, String)
-    m = match(r"^---\n(.*?)\n---\n(.*)"s, content)
-    isnothing(m) && return
-    yaml_str, body = m.captures
-    lines = split(yaml_str, '\n')
-    found = false
-    for (i, line) in enumerate(lines)
-        if startswith(line, "$key:")
-            lines[i] = "$key: $value"
-            found = true
-            break
-        end
-    end
-    !found && push!(lines, "$key: $value")
-    new_content = "---\n" * join(lines, "\n") * "\n---\n" * body
-    write(path, new_content)
+    yaml_str, body = _split_frontmatter(content)
+    isnothing(yaml_str) && return
+    yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
+    yaml[key] = value
+    _write_frontmatter!(path, yaml, body)
 end
 
 function add_comment!(path, comment)
     content = read(path, String)
-    m = match(r"^---\n(.*?)\n---\n(.*)"s, content)
-    isnothing(m) && return
-    yaml_str, body = m.captures
-    lines = split(yaml_str, '\n')
-    comment_idx = findfirst(l -> startswith(l, "comments:"), lines)
+    yaml_str, body = _split_frontmatter(content)
+    isnothing(yaml_str) && return
+    yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
     timestamp = Dates.format(now(), "yyyy-mm-dd HH:MM")
-    new_entry = "  - \"[$timestamp] $comment\""
-    if isnothing(comment_idx)
-        push!(lines, "comments:")
-        push!(lines, new_entry)
-    else
-        insert_at = comment_idx + 1
-        while insert_at <= length(lines) && startswith(lines[insert_at], "  - ")
-            insert_at += 1
-        end
-        insert!(lines, insert_at, new_entry)
-    end
-    new_content = "---\n" * join(lines, "\n") * "\n---\n" * body
-    write(path, new_content)
+    comments = get!(yaml, "comments", String[])
+    push!(comments, "[$timestamp] $comment")
+    _write_frontmatter!(path, yaml, body)
 end
 
 function parse_comments(yaml)
-    comments = String[]
-    path = get(yaml, "_path", "")
-    isempty(path) && return comments
-    content = read(path, String)
-    m = match(r"^---\n(.*?)\n---\n"s, content)
-    isnothing(m) && return comments
-    in_comments = false
-    for line in split(m.captures[1], '\n')
-        if startswith(line, "comments:")
-            in_comments = true
-            continue
-        end
-        if in_comments
-            cm = match(r"^\s+-\s+\"(.*)\"$", line)
-            if !isnothing(cm)
-                push!(comments, cm.captures[1])
-            elseif !startswith(line, "  ")
-                break
-            end
-        end
-    end
-    comments
+    comments = get(yaml, "comments", String[])
+    [string(c) for c in comments]
 end
 
 function status_badge(status)
@@ -534,7 +501,7 @@ function render_diff_html(diff_text)
                 nm = match(r"\+(\d+)", line)
                 new_ln = isnothing(nm) ? old_ln : parse(Int, nm.captures[1]) - 1
             end
-            push!(current_rows, h.tr(class="diff-hunk")(
+            push!(current_rows, h.tr(class="diff-hunk", data_file=current_file)(
                 h.td(; class="diff-ln", colspan="2")("..."),
                 h.td(; class="diff-sign")(),
                 h.td(class="diff-code")(_html_escape(line)),
@@ -548,7 +515,7 @@ function render_diff_html(diff_text)
         elseif startswith(line, "+")
             new_ln += 1
             text = line[2:end]
-            push!(current_rows, h.tr(class="diff-add")(
+            push!(current_rows, h.tr(class="diff-add", data_file=current_file, data_line="$new_ln")(
                 h.td(class="diff-ln")(""),
                 h.td(class="diff-ln")("$new_ln"),
                 h.td(class="diff-sign")("+"),
@@ -558,7 +525,7 @@ function render_diff_html(diff_text)
         elseif startswith(line, "-")
             old_ln += 1
             text = line[2:end]
-            push!(current_rows, h.tr(class="diff-del")(
+            push!(current_rows, h.tr(class="diff-del", data_file=current_file, data_line="$old_ln")(
                 h.td(class="diff-ln")("$old_ln"),
                 h.td(class="diff-ln")(""),
                 h.td(class="diff-sign")("-"),
@@ -568,7 +535,7 @@ function render_diff_html(diff_text)
         elseif !isempty(current_file)
             old_ln += 1; new_ln += 1
             text = startswith(line, " ") ? line[2:end] : line
-            push!(current_rows, h.tr(class="diff-ctx")(
+            push!(current_rows, h.tr(class="diff-ctx", data_file=current_file, data_line="$new_ln")(
                 h.td(class="diff-ln")("$old_ln"),
                 h.td(class="diff-ln")("$new_ln"),
                 h.td(class="diff-sign")(),
@@ -601,6 +568,8 @@ function render_diff_html(diff_text)
         end for (fname, lang, rows, code_lines) in files]...
     )
 end
+
+const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, state)
 
 @htmx struct AppContext
     req = nothing
@@ -724,7 +693,8 @@ end
     .diff-file:not([open]) > .diff-file-header::before { content: "▸ "; }
     .diff-table { width: 100%; border-collapse: collapse; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.75rem; line-height: 1.4; }
     .diff-table td { padding: 0 0.5rem; vertical-align: top; white-space: pre-wrap; word-wrap: break-word; }
-    .diff-ln { width: auto; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; white-space: nowrap !important; word-wrap: normal !important; }
+    .diff-ln { width: auto; text-align: right; color: #8b949e; user-select: none; padding-right: 0.5rem !important; border-right: 1px solid #d0d7de; white-space: nowrap !important; word-wrap: normal !important; cursor: pointer; }
+    .diff-ln:hover { color: #0969da; }
     .diff-sign { width: 16px; min-width: 16px; text-align: center; user-select: none; }
     .diff-code { overflow-x: auto; white-space: pre !important; }
     .diff-code code { white-space: pre !important; }
@@ -1059,7 +1029,6 @@ end
     end
 
     # Query GitHub PR state; returns "draft", "open", "merged", "closed", or ""
-    _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, state)
     _pr_github_state(pr_url) = begin
         isnothing(pr_url) && return ""
         # Cache for 60 seconds
@@ -1376,6 +1345,25 @@ end
                     if (e.target.tagName === 'TEXTAREA') {
                         e.target.classList.remove('ready-to-send');
                     }
+                });
+                // Click on diff line number → insert file:line reference into comment textarea
+                document.body.addEventListener('click', function(e) {
+                    var ln = e.target.closest('.diff-ln');
+                    if (!ln) return;
+                    var row = ln.closest('tr');
+                    if (!row || !row.dataset.file || !row.dataset.line) return;
+                    var card = row.closest('.proposal-card');
+                    if (!card) return;
+                    var ta = card.querySelector('textarea[name="msg"]');
+                    if (!ta) return;
+                    var ref = row.dataset.file + ':' + row.dataset.line + ': ';
+                    var pos = ta.selectionStart || ta.value.length;
+                    var before = ta.value.substring(0, pos);
+                    var after = ta.value.substring(pos);
+                    var prefix = (before.length > 0 && !before.endsWith('\\n')) ? '\\n' : '';
+                    ta.value = before + prefix + ref + after;
+                    ta.focus();
+                    ta.selectionStart = ta.selectionEnd = (before + prefix + ref).length;
                 });
             """),
         );
