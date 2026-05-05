@@ -160,79 +160,68 @@ function _run_mwe_safe(script_path, run_dir)
     # Stream output directly to the stable .out file so the UI can poll it live
     out_path = _mwe_output_path(script_path, run_dir)
     mkpath(dirname(out_path))
-    result = try
-        open(out_path, "w") do f
-            println(f, "# MWE: $(basename(script_path)) on $label")
-            println(f, "# started: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
-            println(f, "# dir: $run_dir")
-            println(f, "# project: $project_dir")
-            println(f, "---")
+    open(out_path, "w") do f
+        println(f, "# MWE: $(basename(script_path)) on $label")
+        println(f, "# started: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+        println(f, "# dir: $run_dir")
+        println(f, "# project: $project_dir")
+        println(f, "---")
+        flush(f)
+        # Run setup.sh if present
+        if isfile(setup_sh)
+            println(f, "==> Running setup.sh")
             flush(f)
-            # Run setup.sh if present
-            if isfile(setup_sh)
-                println(f, "==> Running setup.sh")
-                flush(f)
-                setup_cmd = setenv(`bash $setup_sh $run_dir $label`; dir=run_dir)
-                setup_proc = run(pipeline(setup_cmd; stdout=f, stderr=f); wait=false)
-                wait(setup_proc)
-                flush(f)
-                if setup_proc.exitcode != 0
-                    println(f, "\n# exit_code: $(setup_proc.exitcode)")
-                    println(f, "# status: FAIL (setup.sh)")
-                    return (; exit_code=setup_proc.exitcode, output=read(out_path, String))
-                end
+            setup_cmd = setenv(`bash $setup_sh $run_dir $label`; dir=run_dir)
+            setup_proc = run(pipeline(setup_cmd; stdout=f, stderr=f); wait=false)
+            wait(setup_proc)
+            flush(f)
+            if setup_proc.exitcode != 0
+                println(f, "\n# exit_code: $(setup_proc.exitcode)")
+                println(f, "# status: FAIL (setup.sh)")
+                return (; exit_code=setup_proc.exitcode, output=read(out_path, String))
             end
-            # Dev the worktree package into the proposal environment if using proposal's Project.toml
-            # Only if the worktree is a Julia package (has Project.toml with a name field)
-            run_dir_project = joinpath(run_dir, "Project.toml")
-            if project_dir != run_dir && isfile(run_dir_project) && contains(read(run_dir_project, String), r"^name\s*="m)
-                println(f, "==> Pkg.develop(path=\"$run_dir\")")
-                flush(f)
-                dev_cmd = setenv(`julia --project=$project_dir -e "using Pkg; Pkg.develop(path=\"$run_dir\")"`; dir=run_dir)
-                dev_proc = run(pipeline(dev_cmd; stdout=f, stderr=f); wait=false)
-                wait(dev_proc)
-                flush(f)
-                if dev_proc.exitcode != 0
-                    println(f, "\n# exit_code: $(dev_proc.exitcode)")
-                    println(f, "# status: FAIL (Pkg.develop)")
-                    return (; exit_code=dev_proc.exitcode, output=read(out_path, String))
-                end
-            end
-            # Instantiate
-            println(f, "==> Pkg.instantiate()")
-            flush(f)
-            inst = setenv(`julia --project=$project_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
-            inst_proc = run(pipeline(inst; stdout=f, stderr=f); wait=false)
-            wait(inst_proc)
-            flush(f)
-            if inst_proc.exitcode != 0
-                println(f, "\n# exit_code: $(inst_proc.exitcode)")
-                println(f, "# status: FAIL (instantiate)")
-                return (; exit_code=inst_proc.exitcode, output=read(out_path, String))
-            end
-            # Run script
-            println(f, "==> Running $(basename(script_path))")
-            flush(f)
-            mwe_env = Dict("MWE_LABEL" => label, "MWE_RUN_DIR" => run_dir)
-            cmd = setenv(addenv(`julia -tauto --project=$project_dir $script_path`, mwe_env); dir=run_dir)
-            proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
-            wait(proc)
-            flush(f)
-            println(f, "\n# exit_code: $(proc.exitcode)")
-            println(f, "# status: $(proc.exitcode == 0 ? "PASS" : "FAIL")")
-            println(f, "# finished: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
-            (; exit_code=proc.exitcode, output=read(out_path, String))
         end
-    catch e
-        output = isfile(out_path) ? read(out_path, String) : ""
-        open(out_path, "a") do f
-            println(f, "\n# exit_code: -1")
-            println(f, "# status: ERROR")
-            println(f, "# error: $(sprint(showerror, e))")
+        # Dev the worktree package into the proposal environment if using proposal's Project.toml
+        # Only if the worktree is a Julia package (has Project.toml with a name field)
+        run_dir_project = joinpath(run_dir, "Project.toml")
+        if project_dir != run_dir && isfile(run_dir_project) && contains(read(run_dir_project, String), r"^name\s*="m)
+            println(f, "==> Pkg.develop(path=\"$run_dir\")")
+            flush(f)
+            dev_cmd = setenv(`julia --project=$project_dir -e "using Pkg; Pkg.develop(path=\"$run_dir\")"`; dir=run_dir)
+            dev_proc = run(pipeline(dev_cmd; stdout=f, stderr=f); wait=false)
+            wait(dev_proc)
+            flush(f)
+            if dev_proc.exitcode != 0
+                println(f, "\n# exit_code: $(dev_proc.exitcode)")
+                println(f, "# status: FAIL (Pkg.develop)")
+                return (; exit_code=dev_proc.exitcode, output=read(out_path, String))
+            end
         end
-        (; exit_code=-1, output=isempty(output) ? "Error: $(sprint(showerror, e))" : output)
+        # Instantiate
+        println(f, "==> Pkg.instantiate()")
+        flush(f)
+        inst = setenv(`julia --project=$project_dir -e "using Pkg; Pkg.instantiate()"`; dir=run_dir)
+        inst_proc = run(pipeline(inst; stdout=f, stderr=f); wait=false)
+        wait(inst_proc)
+        flush(f)
+        if inst_proc.exitcode != 0
+            println(f, "\n# exit_code: $(inst_proc.exitcode)")
+            println(f, "# status: FAIL (instantiate)")
+            return (; exit_code=inst_proc.exitcode, output=read(out_path, String))
+        end
+        # Run script
+        println(f, "==> Running $(basename(script_path))")
+        flush(f)
+        mwe_env = Dict("MWE_LABEL" => label, "MWE_RUN_DIR" => run_dir)
+        cmd = setenv(addenv(`julia -tauto --project=$project_dir $script_path`, mwe_env); dir=run_dir)
+        proc = run(pipeline(cmd; stdout=f, stderr=f); wait=false)
+        wait(proc)
+        flush(f)
+        println(f, "\n# exit_code: $(proc.exitcode)")
+        println(f, "# status: $(proc.exitcode == 0 ? "PASS" : "FAIL")")
+        println(f, "# finished: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+        (; exit_code=proc.exitcode, output=read(out_path, String))
     end
-    result
 end
 
 function _mwe_output_path(script_path, run_dir)
