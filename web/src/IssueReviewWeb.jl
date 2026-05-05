@@ -21,17 +21,13 @@ function _fetch_issue_discussion(url)
     isnothing(m) && return Dict("error" => "could not parse URL: $url")
     repo_slug, num = m.captures
     is_pr = !isnothing(pr_m) && isnothing(issue_m)
-    try
-        cmd = is_pr ?
-            `gh pr view $num --repo $repo_slug --json title,body,comments,author,createdAt,labels,reviews --comments` :
-            `gh issue view $num --repo $repo_slug --json title,body,comments,author,createdAt,labels --comments`
-        raw = strip(read(cmd, String))
-        data = JSON.parse(raw)
-        is_pr && (data["_is_pr"] = true)
-        data
-    catch e
-        Dict("error" => "gh CLI failed: $(sprint(showerror, e))")
-    end
+    cmd = is_pr ?
+        `gh pr view $num --repo $repo_slug --json title,body,comments,author,createdAt,labels,reviews --comments` :
+        `gh issue view $num --repo $repo_slug --json title,body,comments,author,createdAt,labels --comments`
+    raw = strip(read(cmd, String))
+    data = JSON.parse(raw)
+    is_pr && (data["_is_pr"] = true)
+    data
 end
 
 function _format_gh_time(s)
@@ -121,45 +117,26 @@ end
 
 function _fetch_worktree_diff(worktree_path)
     isdir(worktree_path) || return "(worktree not found: $worktree_path)"
-    try
-        # Diff against the main branch (where the worktree diverged from)
-        # Use merge-base to find the common ancestor
-        main_branch = strip(read(setenv(`git rev-parse --abbrev-ref origin/HEAD`; dir=worktree_path), String))
-        if isempty(main_branch) || startswith(main_branch, "fatal")
-            main_branch = "origin/main"
-        end
-        base = strip(read(setenv(`git merge-base $main_branch HEAD`; dir=worktree_path), String))
-        diff = read(setenv(`git diff $base`; dir=worktree_path), String)
-        isempty(diff) && return "(no changes vs main)"
-        diff
-    catch e
-        # Fallback: try simple diff against origin/main
-        try
-            diff = read(setenv(`git diff origin/main`; dir=worktree_path), String)
-            isempty(diff) && return "(no changes vs main)"
-            diff
-        catch e2
-            "Error reading diff: $(sprint(showerror, e2))"
-        end
+    # Resolve the upstream main branch; fall back to literal origin/main when
+    # origin/HEAD isn't set.
+    head_out = read(pipeline(ignorestatus(setenv(`git rev-parse --abbrev-ref origin/HEAD`; dir=worktree_path)); stderr=devnull), String)
+    main_branch = strip(head_out)
+    if isempty(main_branch) || startswith(main_branch, "fatal")
+        main_branch = "origin/main"
     end
+    base = strip(read(setenv(`git merge-base $main_branch HEAD`; dir=worktree_path), String))
+    diff = read(setenv(`git diff $base`; dir=worktree_path), String)
+    isempty(diff) && return "(no changes vs main)"
+    diff
 end
 
 function _run_mwe(script_path, run_dir)
     isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
-    try
-        io = IOBuffer()
-        cmd = setenv(`julia -tauto --project=$run_dir $script_path`; dir=run_dir)
-        proc = run(pipeline(cmd; stdout=io, stderr=io); wait=true)
-        (; exit_code=proc.exitcode, output=String(take!(io)))
-    catch e
-        if e isa ProcessFailedException
-            io_out = try; String(take!(e.procs[1].out)); catch; ""; end
-            (; exit_code=e.procs[1].exitcode, output=io_out)
-        else
-            (; exit_code=-1, output="Error: $(sprint(showerror, e))")
-        end
-    end
+    io = IOBuffer()
+    cmd = ignorestatus(setenv(`julia -tauto --project=$run_dir $script_path`; dir=run_dir))
+    proc = run(pipeline(cmd; stdout=io, stderr=io); wait=true)
+    (; exit_code=proc.exitcode, output=String(take!(io)))
 end
 
 function _run_mwe_safe(script_path, run_dir)
@@ -273,15 +250,10 @@ end
 # Find the repo root for a worktree (to run the MWE on main)
 function _repo_main_dir(worktree_path)
     isdir(worktree_path) || return nothing
-    try
-        # git worktree points back to the main repo
-        root = strip(read(setenv(`git rev-parse --git-common-dir`; dir=worktree_path), String))
-        # git-common-dir returns the .git dir; parent is the repo root
-        main = dirname(root)
-        isdir(main) ? main : nothing
-    catch
-        nothing
-    end
+    isdir(joinpath(worktree_path, ".git")) || isfile(joinpath(worktree_path, ".git")) || return nothing
+    root = strip(read(setenv(`git rev-parse --git-common-dir`; dir=worktree_path), String))
+    main = dirname(root)
+    isdir(main) ? main : nothing
 end
 
 @dynamicstruct struct AsyncIssueData
@@ -1850,11 +1822,8 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         gh_user = strip(read(`gh api user --jq .login`, String))
         fork_slug = "$gh_user/$(split(repo_slug, '/')[2])"
         @info "PUSH target: fork $fork_slug"
-        try
-            # Check if fork exists
-            read(`gh api repos/$fork_slug --jq .full_name`, String)
-        catch
-            # Create fork
+        fork_exists = success(`gh api repos/$fork_slug --jq .full_name`)
+        if !fork_exists
             @info "PUSH creating fork of $repo_slug"
             read(`gh repo fork $repo_slug --clone=false`, String)
             sleep(2)  # Give GitHub a moment
@@ -1873,43 +1842,38 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         result_msg = ""
         mwe_dir = joinpath(worktree, "mwe")
         has_mwe = isdir(mwe_dir) && !isempty(readdir(mwe_dir))
-        try
-            # Resolve push target (direct or fork)
-            target = !isempty(repo_slug) ? _resolve_push_target(repo_slug, worktree) : (; remote="origin", head_prefix="", fork_slug="")
-            remote = target.remote
+        # Resolve push target (direct or fork)
+        target = !isempty(repo_slug) ? _resolve_push_target(repo_slug, worktree) : (; remote="origin", head_prefix="", fork_slug="")
+        remote = target.remote
 
-            # Push the branch (including mwe/ if committed)
-            push_cmd = `git push $remote HEAD:refs/heads/$branch`
-            @info "PUSH push cmd" push_cmd worktree remote
-            push_output = read(pipeline(setenv(push_cmd; dir=worktree); stderr=stdout), String)
-            @info "PUSH push done" push_output
-            # Verify branch exists on remote
-            verify = strip(read(setenv(`git ls-remote $remote refs/heads/$branch`; dir=worktree), String))
-            if isempty(verify)
-                result_msg = "Warning: git push appeared to succeed but branch not found on remote\n"
-                @warn "PUSH verification failed" branch remote
-                return (; result_msg, head_prefix=target.head_prefix)
-            end
-            # Clean up mwe/ if it was committed
-            if has_mwe
-                tracked = !isempty(strip(read(setenv(`git ls-files mwe`; dir=worktree), String)))
-                if tracked
-                    @info "PUSH cleaning up mwe/" worktree
-                    run(setenv(`git rm -rf mwe`; dir=worktree); wait=true)
-                    run(setenv(`git commit -m "Clean up MWE"`; dir=worktree); wait=true)
-                    cleanup_output = read(pipeline(setenv(`git push $remote HEAD:refs/heads/$branch`; dir=worktree); stderr=stdout), String)
-                    @info "PUSH cleanup pushed" cleanup_output
-                    # Restore mwe/ locally
-                    parent = strip(read(pipeline(setenv(Cmd(["git", "rev-parse", "HEAD~1"]); dir=worktree); stderr=stdout), String))
-                    run(setenv(`git checkout $parent -- mwe`; dir=worktree); wait=true)
-                    @info "PUSH mwe/ restored locally"
-                end
-            end
-            (; result_msg, head_prefix=target.head_prefix)
-        catch e
-            @info "PUSH failed" sprint(showerror, e)
-            (; result_msg="Warning: push failed: $(sprint(showerror, e))\n", head_prefix="")
+        # Push the branch (including mwe/ if committed)
+        push_cmd = `git push $remote HEAD:refs/heads/$branch`
+        @info "PUSH push cmd" push_cmd worktree remote
+        push_output = read(pipeline(setenv(push_cmd; dir=worktree); stderr=stdout), String)
+        @info "PUSH push done" push_output
+        # Verify branch exists on remote
+        verify = strip(read(setenv(`git ls-remote $remote refs/heads/$branch`; dir=worktree), String))
+        if isempty(verify)
+            result_msg = "Warning: git push appeared to succeed but branch not found on remote\n"
+            @warn "PUSH verification failed" branch remote
+            return (; result_msg, head_prefix=target.head_prefix)
         end
+        # Clean up mwe/ if it was committed
+        if has_mwe
+            tracked = !isempty(strip(read(setenv(`git ls-files mwe`; dir=worktree), String)))
+            if tracked
+                @info "PUSH cleaning up mwe/" worktree
+                run(setenv(`git rm -rf mwe`; dir=worktree); wait=true)
+                run(setenv(`git commit -m "Clean up MWE"`; dir=worktree); wait=true)
+                cleanup_output = read(pipeline(setenv(`git push $remote HEAD:refs/heads/$branch`; dir=worktree); stderr=stdout), String)
+                @info "PUSH cleanup pushed" cleanup_output
+                # Restore mwe/ locally
+                parent = strip(read(pipeline(setenv(Cmd(["git", "rev-parse", "HEAD~1"]); dir=worktree); stderr=stdout), String))
+                run(setenv(`git checkout $parent -- mwe`; dir=worktree); wait=true)
+                @info "PUSH mwe/ restored locally"
+            end
+        end
+        (; result_msg, head_prefix=target.head_prefix)
     end
 
     @post push_branch(slug; _filter="all") = begin
@@ -1956,39 +1920,30 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             pr_m = match(r"/pull/(\d+)", existing_pr)
             if !isnothing(pr_m) && !isempty(repo_slug)
                 pr_num = pr_m.captures[1]
-                try
-                    body_file = tempname()
-                    write(body_file, full_body)
-                    @info "CREATE_PR running gh pr edit" pr_num repo_slug pr_title body_file
-                    output = read(`gh pr edit $pr_num --repo $repo_slug --title $pr_title --body-file $body_file`, String)
-                    @info "CREATE_PR gh pr edit output" output
-                    rm(body_file; force=true)
-                    add_comment!(path, "PR description updated")
-                    result_msg *= "PR description updated: $existing_pr"
-                catch e
-                    @info "CREATE_PR gh pr edit FAILED" sprint(showerror, e)
-                    result_msg *= "Error updating PR: $(sprint(showerror, e))"
-                end
+                body_file = tempname()
+                write(body_file, full_body)
+                @info "CREATE_PR running gh pr edit" pr_num repo_slug pr_title body_file
+                output = read(`gh pr edit $pr_num --repo $repo_slug --title $pr_title --body-file $body_file`, String)
+                @info "CREATE_PR gh pr edit output" output
+                rm(body_file; force=true)
+                add_comment!(path, "PR description updated")
+                result_msg *= "PR description updated: $existing_pr"
             else
                 result_msg *= "Could not parse PR number from: $existing_pr"
             end
         elseif !isempty(repo_slug) && !isempty(branch)
             # Create new draft PR
-            try
-                body_file = tempname()
-                write(body_file, full_body)
-                head_ref = head_prefix * branch
-                gh_cmd = `gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $head_ref`
-                @info "CREATE_PR gh pr create" gh_cmd
-                pr_url = strip(read(setenv(gh_cmd; dir=worktree), String))
-                rm(body_file; force=true)
-                update_yaml!(path, "pr", pr_url)
-                update_yaml!(path, "status", "review")
-                add_comment!(path, "Draft PR created: $pr_url")
-                result_msg *= "Draft PR created: $pr_url"
-            catch e
-                result_msg *= "Error creating PR: $(sprint(showerror, e))"
-            end
+            body_file = tempname()
+            write(body_file, full_body)
+            head_ref = head_prefix * branch
+            gh_cmd = `gh pr create --draft --repo $repo_slug --title $pr_title --body-file $body_file --head $head_ref`
+            @info "CREATE_PR gh pr create" gh_cmd
+            pr_url = strip(read(setenv(gh_cmd; dir=worktree), String))
+            rm(body_file; force=true)
+            update_yaml!(path, "pr", pr_url)
+            update_yaml!(path, "status", "review")
+            add_comment!(path, "Draft PR created: $pr_url")
+            result_msg *= "Draft PR created: $pr_url"
         else
             result_msg = "Missing repo_slug or branch — cannot create PR"
         end
