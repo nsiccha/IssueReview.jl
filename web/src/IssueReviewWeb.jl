@@ -1046,22 +1046,18 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             ts, state = _pr_state_cache[pr_url]
             time() - ts < 60 && return state
         end
-        state = try
-            pr_m = match(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_url)
-            isnothing(pr_m) && return ""
-            repo, num = pr_m.captures
-            raw = strip(read(`gh pr view $num --repo $repo --json state,isDraft --jq '.state + (if .isDraft then ":draft" else "" end)'`, String))
-            if contains(raw, "MERGED")
-                "merged"
-            elseif contains(raw, "CLOSED")
-                "closed"
-            elseif contains(raw, "draft")
-                "draft"
-            else
-                "open"
-            end
-        catch
-            ""
+        pr_m = match(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_url)
+        isnothing(pr_m) && return ""
+        repo, num = pr_m.captures
+        raw = strip(read(`gh pr view $num --repo $repo --json state,isDraft --jq '.state + (if .isDraft then ":draft" else "" end)'`, String))
+        state = if contains(raw, "MERGED")
+            "merged"
+        elseif contains(raw, "CLOSED")
+            "closed"
+        elseif contains(raw, "draft")
+            "draft"
+        else
+            "open"
         end
         _pr_state_cache[pr_url] = (time(), state)
         state
@@ -1548,9 +1544,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         if isempty(config_json)
             return h.p(; class="ir-error")("Empty config")
         end
-        cfg = try; JSON.parse(config_json); catch e
-            return h.p(; class="ir-error")("Invalid JSON: $(sprint(showerror, e))")
-        end
+        cfg = JSON.parse(config_json)
         _save_config(cfg)
         hx_response(""; redirect="/config")
     end
@@ -1622,9 +1616,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             push!(lines, "## MWE")
             push!(lines, "")
             # Find the last commit containing mwe/ and link to it
-            mwe_commit = try
-                strip(read(setenv(Cmd(["git", "log", "--all", "--format=%H", "-1", "--", "mwe/"]); dir=worktree), String))
-            catch; "" end
+            mwe_commit = strip(read(pipeline(ignorestatus(setenv(Cmd(["git", "log", "--all", "--format=%H", "-1", "--", "mwe/"]); dir=worktree)); stderr=devnull), String))
             repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
             mwe_repo = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
             mwe_link = !isempty(mwe_commit) && !isempty(mwe_repo) ?
@@ -1808,12 +1800,8 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     # Determine push target: direct to origin if we have push access, otherwise fork
     _resolve_push_target(repo_slug, worktree) = begin
         # Check if we have push access to the upstream repo
-        can_push = try
-            perms = strip(read(`gh api repos/$repo_slug --jq .permissions.push`, String))
-            perms == "true"
-        catch
-            false
-        end
+        perms = strip(read(pipeline(ignorestatus(`gh api repos/$repo_slug --jq .permissions.push`); stderr=devnull), String))
+        can_push = perms == "true"
         if can_push
             @info "PUSH target: direct to $repo_slug"
             return (; remote="origin", head_prefix="", fork_slug="")
