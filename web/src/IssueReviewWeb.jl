@@ -55,8 +55,8 @@ function _render_issue_data(data)
 
     label_nodes = [begin
         bg = get(l, "color", "ddd")
-        fg = bg in ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04") ? "24292f" : "fff"
-        h.span(; class="ir-label", style="background:#$bg;color:#$fg")(get(l, "name", ""))
+        fg_cls = bg in ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04") ? "ir-label-light" : "ir-label-dark"
+        h.span(; class="ir-label $fg_cls", style="--ir-label-bg:#$bg")(get(l, "name", ""))
     end for l in labels]
 
     nodes = []
@@ -709,7 +709,9 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .u-badge.ir-status-pr-draft { background: #8250df; }
     .u-badge.ir-status-pr-open { background: #2da44e; }
     .u-badge.ir-status-pr-merged { background: #8250df; }
-    .ir-label { display: inline-block; padding: 0.1em 0.4em; border-radius: 10px; font-size: 0.75rem; margin-right: 0.3rem; }
+    .ir-label { display: inline-block; padding: 0.1em 0.4em; border-radius: 10px; font-size: 0.75rem; margin-right: 0.3rem; background: var(--ir-label-bg); }
+    .ir-label-light { color: #24292f; }
+    .ir-label-dark { color: #fff; }
     .ir-label-row { margin-top: 0.3rem; }
     .ir-row-center { display: flex; align-items: center; gap: 0.5rem; }
     .ir-flex-center { display: flex; align-items: center; }
