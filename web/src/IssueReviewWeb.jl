@@ -43,8 +43,8 @@ end
 function _render_issue_data(data)
     # Handle legacy cached string format
     data isa AbstractString && return h.div(class="markdown-body")(Markdown.html(Markdown.parse(data)))
-    data isa AbstractDict || return h.p(; style="color:#888")(string(data))
-    haskey(data, "error") && return h.p(; style="color:#c00;font-size:0.85rem")(data["error"])
+    data isa AbstractDict || return h.p(; class="ir-muted")(string(data))
+    haskey(data, "error") && return h.p(; class="ir-error-sm")(data["error"])
 
     title = get(data, "title", "")
     body = get(data, "body", "")
@@ -53,16 +53,18 @@ function _render_issue_data(data)
     labels = get(data, "labels", [])
     comments = get(data, "comments", [])
 
-    label_nodes = [h.span(; style="display:inline-block;padding:0.1em 0.4em;border-radius:10px;background:#$(get(l,"color","ddd"));color:#$(get(l,"color","ddd") in ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04") ? "24292f" : "fff");font-size:0.75rem;margin-right:0.3rem")(
-        get(l, "name", "")
-    ) for l in labels]
+    label_nodes = [begin
+        bg = get(l, "color", "ddd")
+        fg = bg in ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04") ? "24292f" : "fff"
+        h.span(; class="ir-label", style="background:#$bg;color:#$fg")(get(l, "name", ""))
+    end for l in labels]
 
     nodes = []
 
     # Issue header
     push!(nodes, h.div(class="disc-header")(
         h.div(class="disc-title")(title),
-        !isempty(label_nodes) ? h.div(; style="margin-top:0.3rem")(label_nodes...) : "",
+        !isempty(label_nodes) ? h.div(; class="ir-label-row")(label_nodes...) : "",
     ))
 
     # Issue body (OP)
@@ -98,11 +100,11 @@ function _render_issue_data(data)
         rbody = get(r, "body", "")
         isempty(rbody) && isempty(rstate) && continue
         state_badge = if rstate == "APPROVED"
-            h.span(; style="color:#1a7f37;font-weight:600")(" ✓ approved")
+            h.span(; class="ir-status-approved")(" ✓ approved")
         elseif rstate == "CHANGES_REQUESTED"
-            h.span(; style="color:#d29922;font-weight:600")(" ✎ changes requested")
+            h.span(; class="ir-status-changes")(" ✎ changes requested")
         elseif rstate == "COMMENTED"
-            h.span(; style="color:#666")(" commented")
+            h.span(; class="ir-status-comment")(" commented")
         else
             ""
         end
@@ -283,9 +285,9 @@ function _repo_main_dir(worktree_path)
 end
 
 @dynamicstruct struct AsyncIssueData
-    discussion[issue_url] = _fetch_issue_discussion(issue_url)
-    diff[worktree_path] = _fetch_worktree_diff(worktree_path)
-    mwe[script_path, run_dir] = _run_mwe_safe(script_path, run_dir)
+    discussion(issue_url) = _fetch_issue_discussion(issue_url)
+    diff(worktree_path) = _fetch_worktree_diff(worktree_path)
+    mwe(script_path, run_dir) = _run_mwe_safe(script_path, run_dir)
 end
 _async_issues = AsyncIssueData(; cache_type=:parallel)
 
@@ -426,24 +428,7 @@ function parse_comments(yaml)
 end
 
 function status_badge(status)
-    color = if status == "review"
-        "#0969da"
-    elseif status == "changes-requested"
-        "#d29922"
-    elseif status == "rejected"
-        "#cf222e"
-    elseif status == "skipped"
-        "#666"
-    elseif status == "pr-draft"
-        "#8250df"
-    elseif status == "pr-open"
-        "#2da44e"
-    elseif status == "pr-merged"
-        "#8250df"
-    else
-        "#888"
-    end
-    h.span(; style="display:inline-block;padding:0.15em 0.5em;border-radius:3px;background:$color;color:white;font-size:0.8em;font-weight:600")(status)
+    h.span(; class="ir-status-badge ir-status-$status")(status)
 end
 
 function _html_escape(s)
@@ -471,7 +456,7 @@ function _prism_lang(filename)
 end
 
 function render_diff_html(diff_text)
-    startswith(diff_text, "(") && return h.p(; style="color:#888;font-size:0.85rem")(diff_text)
+    startswith(diff_text, "(") && return h.p(; class="ir-muted-sm")(diff_text)
     lines = split(diff_text, '\n')
     # Each file collects: (filename, lang, rows, code_lines)
     # code_lines: the raw text per code row (parallel to rows), or nothing for hunk rows
@@ -546,7 +531,7 @@ function render_diff_html(diff_text)
     end
     !isempty(current_file) && push!(files, (current_file, current_lang, current_rows, current_code))
 
-    isempty(files) && return h.p(; style="color:#888;font-size:0.85rem")("(empty diff)")
+    isempty(files) && return h.p(; class="ir-muted-sm")("(empty diff)")
 
     file_id = 0
     h.div()(
@@ -572,7 +557,7 @@ end
 const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, state)
 
 @htmx struct AppContext
-    req = nothing
+    
 
     css = """
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -709,6 +694,68 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .diff-hunk td { color: #0969da; font-weight: 600; padding-top: 0.3rem; padding-bottom: 0.3rem; }
     .diff-ctx { background: white; }
     .diff-ctx .diff-ln { background: #fafbfc; }
+    /* IssueReview-specific classes */
+    .ir-muted { color: #888; }
+    .ir-muted-sm { color: #888; font-size: 0.85rem; }
+    .ir-error-sm { color: #c00; font-size: 0.85rem; }
+    .ir-error { color: red; }
+    .ir-meta-sm { color: #666; font-size: 0.75em; font-weight: 400; margin-right: 0.5em; }
+    .ir-status-approved { color: #1a7f37; font-weight: 600; }
+    .ir-status-changes { color: #d29922; font-weight: 600; }
+    .ir-status-comment { color: #666; }
+    .ir-status-badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 3px; color: white; font-size: 0.8em; font-weight: 600; background: #888; }
+    .ir-status-badge.ir-status-review { background: #0969da; }
+    .ir-status-badge.ir-status-changes-requested { background: #d29922; }
+    .ir-status-badge.ir-status-rejected { background: #cf222e; }
+    .ir-status-badge.ir-status-skipped { background: #666; }
+    .ir-status-badge.ir-status-pr-draft { background: #8250df; }
+    .ir-status-badge.ir-status-pr-open { background: #2da44e; }
+    .ir-status-badge.ir-status-pr-merged { background: #8250df; }
+    .ir-label { display: inline-block; padding: 0.1em 0.4em; border-radius: 10px; font-size: 0.75rem; margin-right: 0.3rem; }
+    .ir-label-row { margin-top: 0.3rem; }
+    .ir-row-center { display: flex; align-items: center; gap: 0.5rem; }
+    .ir-flex-center { display: flex; align-items: center; }
+    .ir-mwe-block { margin-bottom: 0.75rem; }
+    .ir-mwe-title-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
+    .ir-mwe-title { font-size: 0.85rem; }
+    .ir-mwe-grid-mt { margin-top: 0.5rem; }
+    .ir-form-rerun-mwe { margin-left: auto; }
+    .ir-form-rerun-mwe button { font-size: 0.65rem; padding: 0.05rem 0.3rem; }
+    .ir-btn-xs { font-size: 0.7rem; padding: 0.1rem 0.4rem; }
+    .ir-btn-sm { font-size: 0.75rem; padding: 0.15rem 0.5rem; }
+    .ir-btn-tiny-text { font-size: 0.75rem; }
+    .ir-pr-section { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #d0d7de; }
+    .ir-pr-section-title { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .ir-pr-link { font-weight: 400; font-size: 0.8rem; }
+    .ir-agent-hint { font-weight: normal; font-size: 0.8em; color: #666; }
+    .ir-agent-row { margin-bottom: 0.5rem; display: flex; gap: 0.5rem; }
+    .ir-instructions-md { font-size: 0.8rem; background: #f6f8fa; padding: 0.75rem; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; user-select: all; }
+    .ir-hidden { display: none; }
+    .ir-shortcut-bar { position: fixed; top: 0; left: 0; right: 0; background: #0969da; color: white; padding: 0.5rem 1rem; text-align: center; cursor: pointer; z-index: 100; font-size: 0.9rem; }
+    .ir-config-help { font-size: 0.85rem; color: #666; margin-bottom: 0.75rem; }
+    .ir-pr-form-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; background: white; }
+    .ir-pr-form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+    .ir-pr-form-h3 { margin: 0; }
+    .ir-pr-form-existing { font-size: 0.85rem; color: #666; margin-bottom: 0.5rem; }
+    .ir-pr-form-meta { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+    .ir-pr-form-meta-lg { font-size: 0.85rem; color: #666; }
+    .ir-pr-form-label { font-size: 0.85rem; font-weight: 600; }
+    .ir-pr-form-hint { font-weight: 400; color: #888; }
+    .ir-pr-form-input { width: 100%; padding: 0.3rem; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; margin: 0.3rem 0 0.75rem; }
+    .ir-pr-form-input-lg { width: 100%; padding: 0.4rem; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 0.75rem; }
+    .ir-pr-form-textarea { width: 100%; padding: 0.3rem; font-family: inherit; font-size: 0.85rem; border: 1px solid #ccc; border-radius: 4px; margin: 0.3rem 0 0.75rem; }
+    .ir-pr-form-textarea-lg { width: 100%; padding: 0.5rem; font-family: inherit; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 0.75rem; }
+    .ir-pr-form-mb { margin-bottom: 0.75rem; }
+    .ir-pr-form-actions { display: flex; gap: 0.5rem; }
+    .ir-pr-preview-pre { border: 1px solid #d0d7de; border-radius: 4px; padding: 0.75rem; background: #fafbfc; margin-top: 0.3rem; font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; }
+    .ir-pr-preview-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 1rem; background: #fafbfc; margin-bottom: 1rem; }
+    .ir-banner { padding: 0.75rem; border: 1px solid; border-radius: 6px; margin-bottom: 0.75rem; }
+    .ir-banner.ir-banner-success { border-color: #2da44e; background: #dafbe1; }
+    .ir-banner.ir-banner-error { border-color: #cf222e; background: #ffebe9; }
+    .ir-banner-msg { font-size: 0.9rem; margin: 0; }
+    .ir-banner-msg.ir-banner-msg-success { color: #1a7f37; }
+    .ir-banner-msg.ir-banner-msg-error { color: #cf222e; }
+    .ir-banner-detail { font-size: 0.8rem; color: #666; margin: 0.3rem 0 0; }
     """
 
     proposals = list_proposals()
@@ -761,7 +808,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     _render_mwe_panel(label, result, script_path, run_dir; slug="") = begin
         out_path = _mwe_output_path(script_path, run_dir)
         rerun_btn = post_form("/rerun_mwe_single";
-            label="↻", btn_class="btn", style="font-size:0.65rem;padding:0.05rem 0.3rem;margin-left:auto",
+            label="↻", btn_class="btn", form_class="ir-form-rerun-mwe",
             hx_target="#proposal-$slug", hx_swap="outerHTML",
             script=script_path, dir=run_dir, slug,
         )
@@ -769,7 +816,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             # Task running — stream from the .out file
             live_output = isfile(out_path) ? read(out_path, String) : ""
             h.div(class="mwe-panel")(
-                h.div(; class="mwe-panel-header mwe-loading", style="display:flex;align-items:center")(
+                h.div(; class="mwe-panel-header mwe-loading ir-flex-center")(
                     "$label — running...",
                     rerun_btn,
                 ),
@@ -789,7 +836,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             end
             ts_label = isempty(ts) ? "" : " ($ts)"
             h.div(class="mwe-panel")(
-                h.div(; class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")", style="display:flex;align-items:center")(
+                h.div(; class="mwe-panel-header ir-flex-center $(pass ? "mwe-pass" : "mwe-fail")")(
                     "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label",
                     rerun_btn,
                 ),
@@ -848,10 +895,9 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         is_running = was_triggered && !has_results
         show_panels = was_triggered || has_results
 
-        btn_style = "font-size:0.75rem;padding:0.15rem 0.5rem"
-        h.div(; style="margin-bottom:0.75rem")(
-            h.div(; style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem")(
-                h.strong(; style="font-size:0.85rem")(sname),
+        h.div(; class="ir-mwe-block")(
+            h.div(; class="ir-mwe-title-row")(
+                h.strong(; class="ir-mwe-title")(sname),
                 !show_panels ? post_form("/run_mwe";
                     label="Run", btn_class="btn btn-approve", hx_target="#proposal-$slug", hx_swap="outerHTML",
                     script, worktree, slug,
@@ -869,7 +915,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                     h.pre()(h.code(; class="language-julia")(_html_escape(join(script_lines, '\n')))),
                 )
             end,
-            show_panels ? h.div(class="mwe-grid"; style="margin-top:0.5rem")(
+            show_panels ? h.div(class="mwe-grid ir-mwe-grid-mt")(
                 !isnothing(main_dir) ? _render_mwe_panel("main", main_result, script, main_dir; slug) : "",
                 _render_mwe_panel("worktree", worktree_result, script, worktree; slug),
             ) : "",
@@ -1153,11 +1199,11 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             h.summary(class="card-header")(
                 h.div(class="proposal-header")(
                     h.div(class="proposal-title")(
-                        h.span(; style="font-size:0.75em;color:#666;font-weight:400;margin-right:0.5em")(repo_name),
+                        h.span(; class="ir-meta-sm")(repo_name),
                         h.a(; href="/proposal/$slug")(slug),
                     ),
-                    h.div(; style="display:flex;align-items:center;gap:0.5rem")(
-                        h.button(; class="btn", style="font-size:0.7rem;padding:0.1rem 0.4rem",
+                    h.div(; class="ir-row-center")(
+                        h.button(; class="btn ir-btn-xs",
                             hx_post="/refresh_card/$slug",
                             hx_target="#proposal-$slug",
                             hx_swap="outerHTML",
@@ -1191,10 +1237,10 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 # Right column — issue discussion + PR discussion
                 h.div(class="card-right")(
                     !isempty(issue) && issue != pr ? _render_discussion(issue) : "",
-                    !isnothing(pr) ? h.div(; style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid #d0d7de")(
-                        h.div(; style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem")(
+                    !isnothing(pr) ? h.div(; class="ir-pr-section")(
+                        h.div(; class="ir-pr-section-title")(
                             "Pull Request ",
-                            h.a(; href=pr, target="_blank", style="font-weight:400;font-size:0.8rem")(pr),
+                            h.a(; href=pr, target="_blank", class="ir-pr-link")(pr),
                         ),
                         _render_discussion(pr),
                     ) : "",
@@ -1431,16 +1477,16 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 h.a(; href="/instructions")("Agent instructions"),
             ),
             !isempty(md) ? h.details(class="agent-instructions")(
-                h.summary(h.strong("Agent workflow"), " ", h.span(; style="font-weight:normal;font-size:0.8em;color:#666")("(click to expand)")),
+                h.summary(h.strong("Agent workflow"), " ", h.span(; class="ir-agent-hint")("(click to expand)")),
                 h.div(; id="instructions-content")(
-                    h.div(; style="margin-bottom:0.5rem;display:flex;gap:0.5rem")(
-                        h.button(; class="btn", style="font-size:0.75rem;padding:0.15rem 0.5rem",
-                            onclick="var c=document.getElementById('instructions-content'); var md=c.querySelector('.instructions-md'); var html=c.querySelector('.instructions-html'); if(md.style.display==='none'){md.style.display='';html.style.display='none';this.textContent='Show rendered'}else{md.style.display='none';html.style.display='';this.textContent='Show markdown'}")("Show rendered"),
-                        h.button(; class="btn", style="font-size:0.75rem;padding:0.15rem 0.5rem",
+                    h.div(; class="ir-agent-row")(
+                        h.button(; class="btn ir-btn-sm",
+                            onclick="var c=document.getElementById('instructions-content'); var md=c.querySelector('.instructions-md'); var html=c.querySelector('.instructions-html'); if(md.classList.contains('ir-hidden')){md.classList.remove('ir-hidden');html.classList.add('ir-hidden');this.textContent='Show rendered'}else{md.classList.add('ir-hidden');html.classList.remove('ir-hidden');this.textContent='Show markdown'}")("Show rendered"),
+                        h.button(; class="btn ir-btn-sm",
                             onclick="var md=document.getElementById('instructions-content').querySelector('.instructions-md'); navigator.clipboard.writeText(md.textContent).then(function(){this.textContent='Copied!';setTimeout(function(){this.textContent='Copy markdown'}.bind(this),1500)}.bind(this))")("Copy markdown"),
                     ),
-                    h.pre(; class="instructions-md", style="font-size:0.8rem;background:#f6f8fa;padding:0.75rem;border-radius:4px;white-space:pre-wrap;word-wrap:break-word;user-select:all")(_html_escape(md)),
-                    h.div(; class="instructions-html proposal-body", style="display:none")(Markdown.html(Markdown.parse(md))),
+                    h.pre(; class="instructions-md ir-instructions-md")(_html_escape(md)),
+                    h.div(; class="instructions-html proposal-body ir-hidden")(Markdown.html(Markdown.parse(md))),
                 ),
             ) : "",
             h.div(; id="proposals-list", hx_include="#current-filter")(_render_list(filter)...),
@@ -1450,7 +1496,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 hx_trigger="every 5s",
                 hx_swap="outerHTML",
                 data_hash=_proposals_hash,
-                style="display:none",
+                class="ir-hidden",
             )(),
         )
         if is_htmx(req)
@@ -1487,10 +1533,10 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 hx_swap="outerHTML", data_hash=new_hash,
             )(
                 h.div(; id="update-banner",
-                    style="position:fixed;top:0;left:0;right:0;background:#0969da;color:white;padding:0.5rem 1rem;text-align:center;cursor:pointer;z-index:100;font-size:0.9rem;",
+                    class="ir-shortcut-bar",
                     hx_get=@query_url(index(; filter="all")),
                     hx_target="#proposals-list", hx_swap="innerHTML",
-                    onclick="this.parentElement.style.display='none'",
+                    onclick="this.parentElement.classList.add('ir-hidden')",
                 )("Proposals updated — click to refresh"),
             )
         else
@@ -1499,7 +1545,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 hx_trigger="every 5s",
                 hx_swap="outerHTML",
                 data_hash=new_hash,
-                style="display:none",
+                class="ir-hidden",
             )()
         end
     end
@@ -1514,7 +1560,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             h.div(class="nav-links")(
                 h.a(; href="/", hx_get="/", hx_target="body", hx_push_url="/")("← Back to reviews"),
             ),
-            h.p(; style="font-size:0.85rem;color:#666;margin-bottom:0.75rem")(
+            h.p(; class="ir-config-help")(
                 "Edit the JSON below. Each response has: ",
                 h.code("label"), ", ", h.code("status"), " (set on click), ",
                 h.code("comment"), " (written to YAML), ", h.code("style"), " (approve/reject/changes/skip), ",
@@ -1536,10 +1582,10 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
     @post save_config(; config_json="") = begin
         if isempty(config_json)
-            return h.p(; style="color:red")("Empty config")
+            return h.p(; class="ir-error")("Empty config")
         end
         cfg = try; JSON.parse(config_json); catch e
-            return h.p(; style="color:red")("Invalid JSON: $(sprint(showerror, e))")
+            return h.p(; class="ir-error")("Invalid JSON: $(sprint(showerror, e))")
         end
         _save_config(cfg)
         hx_response(""; redirect="/config")
@@ -1690,32 +1736,30 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
         action_label = is_update ? "Update PR Description" : "Create Draft PR"
 
-        h.div(; style="border:1px solid #d0d7de;border-radius:6px;padding:1rem;margin-bottom:0.75rem;background:white")(
-            h.div(; style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem")(
-                h.h3(; style="margin:0")(is_update ? "Update PR" : "Create Draft PR"),
-                h.button(; class="btn", style="font-size:0.75rem",
+        h.div(; class="ir-pr-form-card")(
+            h.div(; class="ir-pr-form-header")(
+                h.h3(; class="ir-pr-form-h3")(is_update ? "Update PR" : "Create Draft PR"),
+                h.button(; class="btn ir-btn-tiny-text",
                     onclick="this.closest('[id^=\"pr-form-\"]').innerHTML=''")("Cancel"),
             ),
-            is_update ? h.p(; style="font-size:0.85rem;color:#666;margin-bottom:0.5rem")(h.a(; href=existing_pr, target="_blank")(existing_pr)) : "",
-            !isempty(repo_slug) ? h.p(; style="font-size:0.8rem;color:#888;margin-bottom:0.5rem")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
+            is_update ? h.p(; class="ir-pr-form-existing")(h.a(; href=existing_pr, target="_blank")(existing_pr)) : "",
+            !isempty(repo_slug) ? h.p(; class="ir-pr-form-meta")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
             h.form(; hx_post="/create_pr/$slug", hx_target="#pr-form-$slug", hx_swap="innerHTML")(
-                h.label(; style="font-size:0.85rem;font-weight:600")("Title"),
-                h.input(; type="text", name="pr_title", value=pr_title,
-                    style="width:100%;padding:0.3rem;font-size:0.9rem;border:1px solid #ccc;border-radius:4px;margin:0.3rem 0 0.75rem"),
-                h.label(; style="font-size:0.85rem;font-weight:600")("Your comment ", h.small(; style="font-weight:400;color:#888")("(top of PR body)")),
-                h.textarea(; name="human_comment", rows="3",
-                    style="width:100%;padding:0.3rem;font-family:inherit;font-size:0.85rem;border:1px solid #ccc;border-radius:4px;margin:0.3rem 0 0.75rem",
+                h.label(; class="ir-pr-form-label")("Title"),
+                h.input(; type="text", name="pr_title", value=pr_title, class="ir-pr-form-input"),
+                h.label(; class="ir-pr-form-label")("Your comment ", h.small(; class="ir-pr-form-hint")("(top of PR body)")),
+                h.textarea(; name="human_comment", rows="3", class="ir-pr-form-textarea",
                     placeholder="Optional: add context, notes for reviewers...")("I'll check the changes before marking it as ready for review."),
-                h.div(; style="margin-bottom:0.75rem")(
-                    h.label(; style="font-size:0.85rem;font-weight:600")("Auto-generated content ", h.small(; style="font-weight:400;color:#888")("(will appear below divider on GitHub)")),
-                    h.pre(; style="border:1px solid #d0d7de;border-radius:4px;padding:0.75rem;background:#fafbfc;margin-top:0.3rem;font-size:0.8rem;white-space:pre-wrap;word-wrap:break-word;max-height:400px;overflow-y:auto")(_html_escape(claude_body)),
+                h.div(; class="ir-pr-form-mb")(
+                    h.label(; class="ir-pr-form-label")("Auto-generated content ", h.small(; class="ir-pr-form-hint")("(will appear below divider on GitHub)")),
+                    h.pre(; class="ir-pr-preview-pre")(_html_escape(claude_body)),
                 ),
-                h.textarea(; name="claude_body", style="display:none")(claude_body),
+                h.textarea(; name="claude_body", class="ir-hidden")(claude_body),
                 h.input(; type="hidden", name="repo_slug", value=repo_slug),
                 h.input(; type="hidden", name="worktree", value=worktree),
                 h.input(; type="hidden", name="branch", value=branch),
                 h.input(; type="hidden", name="existing_pr", value=isnothing(existing_pr) ? "" : existing_pr),
-                h.div(; style="display:flex;gap:0.5rem")(
+                h.div(; class="ir-pr-form-actions")(
                     h.button(; class="btn btn-approve", type="submit")(action_label),
                 ),
             ),
@@ -1756,26 +1800,24 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 h.a(; href="/", hx_get="/", hx_target="body", hx_push_url="/")("← Back to reviews"),
             ),
             heading,
-            !isempty(repo_slug) ? h.p(; style="font-size:0.85rem;color:#666")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
+            !isempty(repo_slug) ? h.p(; class="ir-pr-form-meta-lg")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
             h.div(class="config-section")(
                 h.h3("PR Title"),
                 h.form(; hx_post="/create_pr/$slug", hx_target="body", hx_swap="innerHTML")(
-                    h.input(; type="text", name="pr_title", value=pr_title,
-                        style="width:100%;padding:0.4rem;font-size:0.95rem;border:1px solid #ccc;border-radius:4px;margin-bottom:0.75rem"),
-                    h.h3("Your comment ", h.small(; style="font-weight:400;color:#888")("(appears at the top of the PR body)")),
-                    h.textarea(; name="human_comment", rows="4",
-                        style="width:100%;padding:0.5rem;font-family:inherit;font-size:0.9rem;border:1px solid #ccc;border-radius:4px;margin-bottom:0.75rem",
+                    h.input(; type="text", name="pr_title", value=pr_title, class="ir-pr-form-input-lg"),
+                    h.h3("Your comment ", h.small(; class="ir-pr-form-hint")("(appears at the top of the PR body)")),
+                    h.textarea(; name="human_comment", rows="4", class="ir-pr-form-textarea-lg",
                         placeholder="Optional: add context, notes for reviewers...")("I'll check the changes before marking it as ready for review."),
-                    h.h3("Auto-generated content ", h.small(; style="font-weight:400;color:#888")("(preview — appears below the divider)")),
-                    h.div(; style="border:1px solid #d0d7de;border-radius:6px;padding:1rem;background:#fafbfc;margin-bottom:1rem")(
+                    h.h3("Auto-generated content ", h.small(; class="ir-pr-form-hint")("(preview — appears below the divider)")),
+                    h.div(; class="ir-pr-preview-card")(
                         h.div(class="proposal-body")(Markdown.html(Markdown.parse(claude_body))),
                     ),
-                    h.textarea(; name="claude_body", style="display:none")(_html_escape(claude_body)),
+                    h.textarea(; name="claude_body", class="ir-hidden")(_html_escape(claude_body)),
                     h.input(; type="hidden", name="repo_slug", value=repo_slug),
                     h.input(; type="hidden", name="worktree", value=worktree),
                     h.input(; type="hidden", name="branch", value=branch),
                     h.input(; type="hidden", name="existing_pr", value=isnothing(existing_pr) ? "" : existing_pr),
-                    h.div(; style="display:flex;gap:0.5rem")(
+                    h.div(; class="ir-pr-form-actions")(
                         h.button(; class="btn btn-approve", type="submit")(action_label),
                         h.a(; href="/", class="btn")("Cancel"),
                     ),
@@ -1968,12 +2010,9 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
         # Inline result
         success = !contains(result_msg, "Error") && !contains(result_msg, "Missing") && !contains(result_msg, "Could not")
-        color = success ? "#1a7f37" : "#cf222e"
-        h.div(; style="padding:0.75rem;border:1px solid $(success ? "#2da44e" : "#cf222e");border-radius:6px;background:$(success ? "#dafbe1" : "#ffebe9");margin-bottom:0.75rem")(
-            h.p(; style="font-size:0.9rem;color:$color;margin:0")(result_msg),
-            success ? h.p(; style="font-size:0.8rem;color:#666;margin:0.3rem 0 0")(
-                "Reload the page to see updated status.",
-            ) : "",
+        h.div(; class="ir-banner $(success ? "ir-banner-success" : "ir-banner-error")")(
+            h.p(; class="ir-banner-msg $(success ? "ir-banner-msg-success" : "ir-banner-msg-error")")(result_msg),
+            success ? h.p(; class="ir-banner-detail")("Reload the page to see updated status.") : "",
         )
     end
 end
