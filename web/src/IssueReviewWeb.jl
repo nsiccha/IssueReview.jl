@@ -335,9 +335,7 @@ end
 
 function _load_config()
     path = _config_path()
-    if isfile(path)
-        try; return JSON.parsefile(path); catch; end
-    end
+    isfile(path) && return JSON.parsefile(path)
     cfg = Dict("responses" => _default_responses(), "quick_comments" => _default_quick_comments())
     mkpath(dirname(path))
     open(path, "w") do io; JSON.print(io, cfg, 2); end
@@ -1724,8 +1722,8 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
 
         branch = ""
-        if !isempty(worktree) && isdir(worktree)
-            try; branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String)); catch; end
+        if !isempty(worktree) && isdir(worktree) && ispath(joinpath(worktree, ".git"))
+            branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
         end
 
         action_label = is_update ? "Update PR Description" : "Create Draft PR"
@@ -1779,10 +1777,8 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
         # Detect branch name from worktree
         branch = ""
-        if !isempty(worktree) && isdir(worktree)
-            try
-                branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
-            catch; end
+        if !isempty(worktree) && isdir(worktree) && ispath(joinpath(worktree, ".git"))
+            branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
         end
 
         action_label = is_update ? "Update PR Description" : "Create Draft PR"
@@ -1896,12 +1892,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             end
             # Clean up mwe/ if it was committed
             if has_mwe
-                tracked = try
-                    run(setenv(`git ls-files --error-unmatch mwe`; dir=worktree); wait=true)
-                    true
-                catch
-                    false
-                end
+                tracked = !isempty(strip(read(setenv(`git ls-files mwe`; dir=worktree), String)))
                 if tracked
                     @info "PUSH cleaning up mwe/" worktree
                     run(setenv(`git rm -rf mwe`; dir=worktree); wait=true)
