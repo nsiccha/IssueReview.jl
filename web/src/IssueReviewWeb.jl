@@ -43,7 +43,7 @@ end
 function _render_issue_data(data)
     # Handle legacy cached string format
     data isa AbstractString && return h.div(class="markdown-body")(Markdown.html(Markdown.parse(data)))
-    data isa AbstractDict || return h.p(; class="ir-muted")(string(data))
+    data isa AbstractDict || return h.p(; class="u-text-muted")(string(data))
     haskey(data, "error") && return h.p(; class="ir-error-sm")(data["error"])
 
     title = get(data, "title", "")
@@ -428,7 +428,7 @@ function parse_comments(yaml)
 end
 
 function status_badge(status)
-    h.span(; class="ir-status-badge ir-status-$status")(status)
+    h.span(; class="u-badge ir-status-$status")(status)
 end
 
 function _html_escape(s)
@@ -695,7 +695,6 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .diff-ctx { background: white; }
     .diff-ctx .diff-ln { background: #fafbfc; }
     /* IssueReview-specific classes */
-    .ir-muted { color: #888; }
     .ir-muted-sm { color: #888; font-size: 0.85rem; }
     .ir-error-sm { color: #c00; font-size: 0.85rem; }
     .ir-error { color: red; }
@@ -703,14 +702,13 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .ir-status-approved { color: #1a7f37; font-weight: 600; }
     .ir-status-changes { color: #d29922; font-weight: 600; }
     .ir-status-comment { color: #666; }
-    .ir-status-badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 3px; color: white; font-size: 0.8em; font-weight: 600; background: #888; }
-    .ir-status-badge.ir-status-review { background: #0969da; }
-    .ir-status-badge.ir-status-changes-requested { background: #d29922; }
-    .ir-status-badge.ir-status-rejected { background: #cf222e; }
-    .ir-status-badge.ir-status-skipped { background: #666; }
-    .ir-status-badge.ir-status-pr-draft { background: #8250df; }
-    .ir-status-badge.ir-status-pr-open { background: #2da44e; }
-    .ir-status-badge.ir-status-pr-merged { background: #8250df; }
+    .u-badge.ir-status-review { background: #0969da; }
+    .u-badge.ir-status-changes-requested { background: #d29922; }
+    .u-badge.ir-status-rejected { background: #cf222e; }
+    .u-badge.ir-status-skipped { background: #666; }
+    .u-badge.ir-status-pr-draft { background: #8250df; }
+    .u-badge.ir-status-pr-open { background: #2da44e; }
+    .u-badge.ir-status-pr-merged { background: #8250df; }
     .ir-label { display: inline-block; padding: 0.1em 0.4em; border-radius: 10px; font-size: 0.75rem; margin-right: 0.3rem; }
     .ir-label-row { margin-top: 0.3rem; }
     .ir-row-center { display: flex; align-items: center; gap: 0.5rem; }
@@ -721,8 +719,6 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .ir-mwe-grid-mt { margin-top: 0.5rem; }
     .ir-form-rerun-mwe { margin-left: auto; }
     .ir-form-rerun-mwe button { font-size: 0.65rem; padding: 0.05rem 0.3rem; }
-    .ir-btn-xs { font-size: 0.7rem; padding: 0.1rem 0.4rem; }
-    .ir-btn-sm { font-size: 0.75rem; padding: 0.15rem 0.5rem; }
     .ir-btn-tiny-text { font-size: 0.75rem; }
     .ir-pr-section { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #d0d7de; }
     .ir-pr-section-title { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; }
@@ -730,7 +726,6 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .ir-agent-hint { font-weight: normal; font-size: 0.8em; color: #666; }
     .ir-agent-row { margin-bottom: 0.5rem; display: flex; gap: 0.5rem; }
     .ir-instructions-md { font-size: 0.8rem; background: #f6f8fa; padding: 0.75rem; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; user-select: all; }
-    .ir-hidden { display: none; }
     .ir-shortcut-bar { position: fixed; top: 0; left: 0; right: 0; background: #0969da; color: white; padding: 0.5rem 1rem; text-align: center; cursor: pointer; z-index: 100; font-size: 0.9rem; }
     .ir-config-help { font-size: 0.85rem; color: #666; margin-bottom: 0.75rem; }
     .ir-pr-form-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; background: white; }
@@ -749,9 +744,6 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     .ir-pr-form-actions { display: flex; gap: 0.5rem; }
     .ir-pr-preview-pre { border: 1px solid #d0d7de; border-radius: 4px; padding: 0.75rem; background: #fafbfc; margin-top: 0.3rem; font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; }
     .ir-pr-preview-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 1rem; background: #fafbfc; margin-bottom: 1rem; }
-    .ir-banner { padding: 0.75rem; border: 1px solid; border-radius: 6px; margin-bottom: 0.75rem; }
-    .ir-banner.ir-banner-success { border-color: #2da44e; background: #dafbe1; }
-    .ir-banner.ir-banner-error { border-color: #cf222e; background: #ffebe9; }
     .ir-banner-msg { font-size: 0.9rem; margin: 0; }
     .ir-banner-msg.ir-banner-msg-success { color: #1a7f37; }
     .ir-banner-msg.ir-banner-msg-error { color: #cf222e; }
@@ -1203,7 +1195,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                         h.a(; href="/proposal/$slug")(slug),
                     ),
                     h.div(; class="ir-row-center")(
-                        h.button(; class="btn ir-btn-xs",
+                        h.button(; class="btn u-btn-xs",
                             hx_post="/refresh_card/$slug",
                             hx_target="#proposal-$slug",
                             hx_swap="outerHTML",
@@ -1480,13 +1472,13 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 h.summary(h.strong("Agent workflow"), " ", h.span(; class="ir-agent-hint")("(click to expand)")),
                 h.div(; id="instructions-content")(
                     h.div(; class="ir-agent-row")(
-                        h.button(; class="btn ir-btn-sm",
-                            onclick="var c=document.getElementById('instructions-content'); var md=c.querySelector('.instructions-md'); var html=c.querySelector('.instructions-html'); if(md.classList.contains('ir-hidden')){md.classList.remove('ir-hidden');html.classList.add('ir-hidden');this.textContent='Show rendered'}else{md.classList.add('ir-hidden');html.classList.remove('ir-hidden');this.textContent='Show markdown'}")("Show rendered"),
-                        h.button(; class="btn ir-btn-sm",
+                        h.button(; class="btn u-btn-sm",
+                            onclick="var c=document.getElementById('instructions-content'); var md=c.querySelector('.instructions-md'); var html=c.querySelector('.instructions-html'); if(md.classList.contains('u-hidden')){md.classList.remove('u-hidden');html.classList.add('u-hidden');this.textContent='Show rendered'}else{md.classList.add('u-hidden');html.classList.remove('u-hidden');this.textContent='Show markdown'}")("Show rendered"),
+                        h.button(; class="btn u-btn-sm",
                             onclick="var md=document.getElementById('instructions-content').querySelector('.instructions-md'); navigator.clipboard.writeText(md.textContent).then(function(){this.textContent='Copied!';setTimeout(function(){this.textContent='Copy markdown'}.bind(this),1500)}.bind(this))")("Copy markdown"),
                     ),
                     h.pre(; class="instructions-md ir-instructions-md")(_html_escape(md)),
-                    h.div(; class="instructions-html proposal-body ir-hidden")(Markdown.html(Markdown.parse(md))),
+                    h.div(; class="instructions-html proposal-body u-hidden")(Markdown.html(Markdown.parse(md))),
                 ),
             ) : "",
             h.div(; id="proposals-list", hx_include="#current-filter")(_render_list(filter)...),
@@ -1496,7 +1488,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 hx_trigger="every 5s",
                 hx_swap="outerHTML",
                 data_hash=_proposals_hash,
-                class="ir-hidden",
+                class="u-hidden",
             )(),
         )
         if is_htmx(req)
@@ -1536,7 +1528,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                     class="ir-shortcut-bar",
                     hx_get=@query_url(index(; filter="all")),
                     hx_target="#proposals-list", hx_swap="innerHTML",
-                    onclick="this.parentElement.classList.add('ir-hidden')",
+                    onclick="this.parentElement.classList.add('u-hidden')",
                 )("Proposals updated — click to refresh"),
             )
         else
@@ -1545,7 +1537,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                 hx_trigger="every 5s",
                 hx_swap="outerHTML",
                 data_hash=new_hash,
-                class="ir-hidden",
+                class="u-hidden",
             )()
         end
     end
@@ -1754,7 +1746,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                     h.label(; class="ir-pr-form-label")("Auto-generated content ", h.small(; class="ir-pr-form-hint")("(will appear below divider on GitHub)")),
                     h.pre(; class="ir-pr-preview-pre")(_html_escape(claude_body)),
                 ),
-                h.textarea(; name="claude_body", class="ir-hidden")(claude_body),
+                h.textarea(; name="claude_body", class="u-hidden")(claude_body),
                 h.input(; type="hidden", name="repo_slug", value=repo_slug),
                 h.input(; type="hidden", name="worktree", value=worktree),
                 h.input(; type="hidden", name="branch", value=branch),
@@ -1812,7 +1804,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
                     h.div(; class="ir-pr-preview-card")(
                         h.div(class="proposal-body")(Markdown.html(Markdown.parse(claude_body))),
                     ),
-                    h.textarea(; name="claude_body", class="ir-hidden")(_html_escape(claude_body)),
+                    h.textarea(; name="claude_body", class="u-hidden")(_html_escape(claude_body)),
                     h.input(; type="hidden", name="repo_slug", value=repo_slug),
                     h.input(; type="hidden", name="worktree", value=worktree),
                     h.input(; type="hidden", name="branch", value=branch),
@@ -2010,7 +2002,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
         # Inline result
         success = !contains(result_msg, "Error") && !contains(result_msg, "Missing") && !contains(result_msg, "Could not")
-        h.div(; class="ir-banner $(success ? "ir-banner-success" : "ir-banner-error")")(
+        h.div(; class="u-status-callout $(success ? "u-status-success" : "u-status-error")")(
             h.p(; class="ir-banner-msg $(success ? "ir-banner-msg-success" : "ir-banner-msg-error")")(result_msg),
             success ? h.p(; class="ir-banner-detail")("Reload the page to see updated status.") : "",
         )
