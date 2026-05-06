@@ -36,10 +36,10 @@ function _format_gh_time(s)
     isnothing(m) ? s : "$(m.captures[1]) $(m.captures[2])"
 end
 
-function _render_issue_data(data)
-    # Handle legacy cached string format
-    data isa AbstractString && return h.div(class="markdown-body")(Markdown.html(Markdown.parse(data)))
-    data isa AbstractDict || return h.p(; class="u-text-muted")(string(data))
+# Handle legacy cached string format
+_render_issue_data(data::AbstractString) = h.div(class="markdown-body")(Markdown.html(Markdown.parse(data)))
+_render_issue_data(data) = h.p(; class="u-text-muted")(string(data))
+function _render_issue_data(data::AbstractDict)
     haskey(data, "error") && return h.p(; class="ir-error-sm")(data["error"])
 
     title = get(data, "title", "")
@@ -252,23 +252,19 @@ end
 end
 _async_issues = AsyncIssueData(; cache_type=:parallel)
 
-function _issue_discussion(issue_url)
-    fetchindex(_async_issues.discussion, issue_url) do rv, status
-        rv isa Task ? nothing : rv
-    end
-end
+# Discard the in-flight Task and return only the materialized result
+_skip_pending(::Task, _) = nothing
+_skip_pending(rv, _) = rv
 
-function _worktree_diff(worktree_path)
-    fetchindex(_async_issues.diff, worktree_path) do rv, status
-        rv isa Task ? nothing : rv
-    end
-end
+# Read a field from a quick-comment entry (Dict) or fall back for non-Dict entries
+_qc_msg(qc::AbstractDict) = get(qc, "msg", "")
+_qc_msg(qc) = string(qc)
+_qc_status(qc::AbstractDict) = get(qc, "status", "")
+_qc_status(_) = ""
 
-function _mwe_result(script_path, run_dir)
-    fetchindex(_async_issues.mwe, script_path, run_dir) do rv, status
-        rv isa Task ? nothing : rv
-    end
-end
+_issue_discussion(issue_url) = fetchindex(_skip_pending, _async_issues.discussion, issue_url)
+_worktree_diff(worktree_path) = fetchindex(_skip_pending, _async_issues.diff, worktree_path)
+_mwe_result(script_path, run_dir) = fetchindex(_skip_pending, _async_issues.mwe, script_path, run_dir)
 
 # --- Responses config (editable via web UI) ---
 
@@ -334,7 +330,7 @@ function parse_proposal(path)
     yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
     # Normalize scalar nothings (YAML null) to "" for compatibility
     for (k, v) in yaml
-        v isa Nothing && (yaml[k] = "")
+        isnothing(v) && (yaml[k] = "")
     end
     (; yaml, body, raw=content, path)
 end
@@ -745,9 +741,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     @post refresh_discussion(; url="") = begin
         isempty(url) && return h.span()("No URL")
         # Evict cache and re-fetch
-        fetchindex(_async_issues.discussion, url; force=true) do rv, _
-            rv isa Task ? nothing : rv
-        end
+        fetchindex(_skip_pending, _async_issues.discussion, url; force=true)
         # Return loading state — polling will pick up the result
         h.div(class="issue-discussion")(
             h.span(; class="issue-loading",
@@ -920,8 +914,8 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
             p = _mwe_output_path(script, d)
             open(p, "w") do f; println(f, "# Restarting MWE..."); end
         end
-        !isnothing(main_dir) && fetchindex(_async_issues.mwe, script, main_dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        !isempty(worktree) && fetchindex(_async_issues.mwe, script, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isnothing(main_dir) && fetchindex(_skip_pending, _async_issues.mwe, script, main_dir; force=true)
+        !isempty(worktree) && fetchindex(_skip_pending, _async_issues.mwe, script, worktree; force=true)
         _rerender_card(slug)
     end
 
@@ -938,7 +932,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
     @post rerun_mwe_single(; script="", dir="", slug="") = begin
         p = _mwe_output_path(script, dir)
         isfile(p) && open(p, "w") do f; println(f, "# Restarting MWE..."); end
-        fetchindex(_async_issues.mwe, script, dir; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        fetchindex(_skip_pending, _async_issues.mwe, script, dir; force=true)
         _rerender_card(slug)
     end
 
@@ -946,7 +940,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         diff_text = _worktree_diff(worktree)
         # Auto-refresh stale diffs (cached from old code or empty)
         if !isnothing(diff_text) && startswith(diff_text, "(")
-            fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+            fetchindex(_skip_pending, _async_issues.diff, worktree; force=true)
             diff_text = nothing  # show loading state
         end
         closed_statuses = ("rejected", "skipped", "pr-merged")
@@ -1015,9 +1009,7 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
     @post refresh_diff(; path="") = begin
         isempty(path) && return h.span()("No path")
-        fetchindex(_async_issues.diff, path; force=true) do rv, _
-            rv isa Task ? nothing : rv
-        end
+        fetchindex(_skip_pending, _async_issues.diff, path; force=true)
         h.div(class="diff-viewer")(
             h.span(; class="issue-loading",
                 hx_get=@query_url(worktree_diff(; path)),
@@ -1123,8 +1115,8 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
 
         # Quick comment buttons
         quick_buttons = map(_quick_comments()) do qc
-            msg = qc isa AbstractDict ? get(qc, "msg", "") : string(qc)
-            qstatus = qc isa AbstractDict ? get(qc, "status", "") : ""
+            msg = _qc_msg(qc)
+            qstatus = _qc_status(qc)
             color_cls = if contains(qstatus, "changes")
                 "btn-quick-changes"
             elseif contains(qstatus, "skip")
@@ -1400,9 +1392,9 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         pr_val = get(p.yaml, "pr", "")
         pr_val = pr_val in ("null", "") ? nothing : pr_val
         worktree = get(p.yaml, "worktree", "")
-        !isempty(issue) && fetchindex(_async_issues.discussion, issue; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        !isnothing(pr_val) && fetchindex(_async_issues.discussion, pr_val; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        !isempty(worktree) && fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isempty(issue) && fetchindex(_skip_pending, _async_issues.discussion, issue; force=true)
+        !isnothing(pr_val) && fetchindex(_skip_pending, _async_issues.discussion, pr_val; force=true)
+        !isempty(worktree) && fetchindex(_skip_pending, _async_issues.diff, worktree; force=true)
         content = h.div()(
             h.h1("Issue Review ", h.small("proposals → review → PR")),
             h.div(class="nav-links")(
@@ -1563,9 +1555,9 @@ const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timest
         pr_val = pr_val in ("null", "") ? nothing : pr_val
         worktree = get(p.yaml, "worktree", "")
         # Evict all caches for this card
-        !isempty(issue) && fetchindex(_async_issues.discussion, issue; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        !isnothing(pr_val) && fetchindex(_async_issues.discussion, pr_val; force=true) do rv, _; rv isa Task ? nothing : rv; end
-        !isempty(worktree) && fetchindex(_async_issues.diff, worktree; force=true) do rv, _; rv isa Task ? nothing : rv; end
+        !isempty(issue) && fetchindex(_skip_pending, _async_issues.discussion, issue; force=true)
+        !isnothing(pr_val) && fetchindex(_skip_pending, _async_issues.discussion, pr_val; force=true)
+        !isempty(worktree) && fetchindex(_skip_pending, _async_issues.diff, worktree; force=true)
         @info "REFRESH_CARD evicted caches for $slug"
         _render_proposal(p)
     end
