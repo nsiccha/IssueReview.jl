@@ -351,7 +351,7 @@ end
 function update_yaml!(path, key, value)
     content = read(path, String)
     yaml_str, body = _split_frontmatter(content)
-    isnothing(yaml_str) && return
+    isnothing(yaml_str) && throw(ArgumentError("update_yaml!: no YAML frontmatter in $path"))
     yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
     yaml[key] = value
     _write_frontmatter!(path, yaml, body)
@@ -360,7 +360,7 @@ end
 function add_comment!(path, comment)
     content = read(path, String)
     yaml_str, body = _split_frontmatter(content)
-    isnothing(yaml_str) && return
+    isnothing(yaml_str) && throw(ArgumentError("add_comment!: no YAML frontmatter in $path"))
     yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
     timestamp = Dates.format(now(), "yyyy-mm-dd HH:MM")
     comments = get!(yaml, "comments", String[])
