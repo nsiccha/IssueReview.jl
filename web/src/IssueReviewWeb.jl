@@ -500,7 +500,7 @@ function render_diff_html(diff_text)
     )
 end
 
-const _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, state)
+_pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, state)
 
 @htmx struct AppContext
     
