@@ -130,15 +130,6 @@ function _fetch_worktree_diff(worktree_path)
     diff
 end
 
-function _run_mwe(script_path, run_dir)
-    isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
-    isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
-    io = IOBuffer()
-    cmd = ignorestatus(setenv(`julia -tauto --project=$run_dir $script_path`; dir=run_dir))
-    proc = run(pipeline(cmd; stdout=io, stderr=io); wait=true)
-    (; exit_code=proc.exitcode, output=String(take!(io)))
-end
-
 function _run_mwe_safe(script_path, run_dir)
     isfile(script_path) || return (; exit_code=-1, output="(script not found: $script_path)")
     isdir(run_dir) || return (; exit_code=-1, output="(directory not found: $run_dir)")
