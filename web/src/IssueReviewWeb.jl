@@ -1364,7 +1364,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         join(parts, "\n\n")
     end
 
-    @get instructions = begin
+    @get instructions() = begin
         md = _agent_instructions_md
         h.div(class="container")(
             h.div(class="nav-links")(
@@ -1484,7 +1484,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
 
     # --- Config page ---
 
-    @get config = begin
+    @get config() = begin
         cfg = _load_config()
         cfg_json = sprint(io -> JSON.print(io, cfg, 2))
         content = h.div(class="config-section")(
@@ -1521,7 +1521,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         hx_response(""; redirect="/config")
     end
 
-    @post config_reset = begin
+    @post config_reset() = begin
         cfg = Dict("responses" => _default_responses(), "quick_comments" => _default_quick_comments())
         _save_config(cfg)
         hx_response(""; redirect="/config")
