@@ -39,6 +39,33 @@ end
 # Handle legacy cached string format
 _render_issue_data(data::AbstractString) = h.div(class="markdown-body")(Markdown.html(Markdown.parse(data)))
 _render_issue_data(data) = h.p(; class="u-text-muted")(string(data))
+_gh_login(entry) = get(get(entry, "author", Dict()), "login", "unknown")
+
+# Render one comment / review entry as a `<div class="disc-comment">` with the
+# author + (time or state-badge) header and the markdown-rendered body.
+function _disc_comment_node(author, header_extra, body)
+    h.div(class="disc-comment")(
+        h.div(class="disc-comment-header")(h.strong(author), header_extra),
+        isempty(body) ? "" : h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(body))),
+    )
+end
+
+# Map a PR-review `state` string to a small inline badge.
+function _review_state_badge(state)
+    state == "APPROVED" && return h.span(; class="ir-status-approved")(" ✓ approved")
+    state == "CHANGES_REQUESTED" && return h.span(; class="ir-status-changes")(" ✎ changes requested")
+    state == "COMMENTED" && return h.span(; class="ir-status-comment")(" commented")
+    ""
+end
+
+const _LIGHT_LABEL_BGS = ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04")
+
+function _label_node(l)
+    bg = get(l, "color", "ddd")
+    fg_cls = bg in _LIGHT_LABEL_BGS ? "ir-label-light" : "ir-label-dark"
+    h.span(; class="ir-label $fg_cls", style="--ir-label-bg:#$bg")(get(l, "name", ""))
+end
+
 function _render_issue_data(data::AbstractDict)
     haskey(data, "error") && return h.p(; class="ir-error-sm")(data["error"])
 
@@ -46,70 +73,34 @@ function _render_issue_data(data::AbstractDict)
     body = get(data, "body", "")
     author = get(get(data, "author", Dict()), "login", "")
     created = _format_gh_time(get(data, "createdAt", ""))
-    labels = get(data, "labels", [])
-    comments = get(data, "comments", [])
+    label_nodes = [_label_node(l) for l in get(data, "labels", [])]
 
-    label_nodes = [begin
-        bg = get(l, "color", "ddd")
-        fg_cls = bg in ("ffffff","f9d0c4","e4e669","fef2c0","d4c5f9","c5def5","bfd4f2","bfdadc","c2e0c6","fbca04") ? "ir-label-light" : "ir-label-dark"
-        h.span(; class="ir-label $fg_cls", style="--ir-label-bg:#$bg")(get(l, "name", ""))
-    end for l in labels]
-
-    nodes = []
-
-    # Issue header
-    push!(nodes, h.div(class="disc-header")(
-        h.div(class="disc-title")(title),
-        !isempty(label_nodes) ? h.div(; class="ir-label-row")(label_nodes...) : "",
-    ))
+    nodes = Any[
+        # Issue header
+        h.div(class="disc-header")(
+            h.div(class="disc-title")(title),
+            isempty(label_nodes) ? "" : h.div(; class="ir-label-row")(label_nodes...),
+        ),
+    ]
 
     # Issue body (OP)
-    if !isempty(body)
-        push!(nodes, h.div(class="disc-comment")(
-            h.div(class="disc-comment-header")(
-                h.strong(author),
-                h.span(class="disc-time")(created),
-            ),
-            h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(body))),
-        ))
-    end
+    isempty(body) || push!(nodes, _disc_comment_node(author, h.span(class="disc-time")(created), body))
 
     # Comments
-    for c in comments
-        cauthor = get(get(c, "author", Dict()), "login", "unknown")
-        ccreated = _format_gh_time(get(c, "createdAt", ""))
-        cbody = get(c, "body", "")
-        push!(nodes, h.div(class="disc-comment")(
-            h.div(class="disc-comment-header")(
-                h.strong(cauthor),
-                h.span(class="disc-time")(ccreated),
-            ),
-            h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(cbody))),
+    for c in get(data, "comments", [])
+        push!(nodes, _disc_comment_node(
+            _gh_login(c),
+            h.span(class="disc-time")(_format_gh_time(get(c, "createdAt", ""))),
+            get(c, "body", ""),
         ))
     end
 
     # PR reviews (if present)
-    reviews = get(data, "reviews", [])
-    for r in reviews
-        rauthor = get(get(r, "author", Dict()), "login", "unknown")
+    for r in get(data, "reviews", [])
         rstate = get(r, "state", "")
         rbody = get(r, "body", "")
         isempty(rbody) && isempty(rstate) && continue
-        state_badge = if rstate == "APPROVED"
-            h.span(; class="ir-status-approved")(" ✓ approved")
-        elseif rstate == "CHANGES_REQUESTED"
-            h.span(; class="ir-status-changes")(" ✎ changes requested")
-        elseif rstate == "COMMENTED"
-            h.span(; class="ir-status-comment")(" commented")
-        else
-            ""
-        end
-        push!(nodes, h.div(class="disc-comment")(
-            h.div(class="disc-comment-header")(
-                h.strong(rauthor), state_badge,
-            ),
-            !isempty(rbody) ? h.div(class="disc-comment-body markdown-body")(Markdown.html(Markdown.parse(rbody))) : "",
-        ))
+        push!(nodes, _disc_comment_node(_gh_login(r), _review_state_badge(rstate), rbody))
     end
 
     h.div()(nodes...)
