@@ -418,6 +418,28 @@ loading_span(label, poll_url; cls="issue-loading", interval="every 2s") = h.span
     class=cls, hx_get=poll_url, hx_trigger=interval, hx_swap="outerHTML",
 )(label)
 
+# --- MWE panel helpers ---
+
+# Scan a `.out` file for the `# finished: ...` marker that `_run_mwe_safe` writes
+# at the bottom. Returns "" when not present (still running or no file yet).
+function _mwe_finished_ts(out_path)
+    isfile(out_path) || return ""
+    for line in eachline(out_path)
+        m = match(r"^# finished: (.+)", line)
+        isnothing(m) || return m.captures[1]
+    end
+    ""
+end
+
+# Header label for a completed MWE run, e.g. "main — PASS (2026-05-11 22:14:01)".
+function _mwe_done_label(label, result, out_path)
+    pass = result.exit_code == 0
+    verdict = pass ? "PASS" : "FAIL (exit $(result.exit_code))"
+    ts = _mwe_finished_ts(out_path)
+    ts_label = isempty(ts) ? "" : " ($ts)"
+    (; pass, text="$label — $verdict$ts_label")
+end
+
 function status_badge(status)
     h.span(; class="u-badge ir-status-$status")(status)
 end
@@ -797,19 +819,10 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
                 )(_html_escape(isempty(live_output) ? "Starting..." : live_output)),
             )
         else
-            pass = result.exit_code == 0
-            ts = ""
-            if isfile(out_path)
-                for line in eachline(out_path)
-                    m = match(r"^# finished: (.+)", line)
-                    !isnothing(m) && (ts = m.captures[1]; break)
-                end
-            end
-            ts_label = isempty(ts) ? "" : " ($ts)"
+            d = _mwe_done_label(label, result, out_path)
             h.div(class="mwe-panel")(
-                h.div(; class="mwe-panel-header ir-flex-center $(pass ? "mwe-pass" : "mwe-fail")")(
-                    "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label",
-                    rerun_btn,
+                h.div(; class="mwe-panel-header ir-flex-center $(d.pass ? "mwe-pass" : "mwe-fail")")(
+                    d.text, rerun_btn,
                 ),
                 h.pre(_html_escape(result.output)),
             )
@@ -829,19 +842,9 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
             )(_html_escape(live_output))
         else
             # Done — return final panel (no more polling)
-            pass = result.exit_code == 0
-            ts = ""
-            if isfile(out_path)
-                for line in eachline(out_path)
-                    m = match(r"^# finished: (.+)", line)
-                    !isnothing(m) && (ts = m.captures[1]; break)
-                end
-            end
-            ts_label = isempty(ts) ? "" : " ($ts)"
+            d = _mwe_done_label(label, result, out_path)
             h.div(class="mwe-panel")(
-                h.div(class="mwe-panel-header $(pass ? "mwe-pass" : "mwe-fail")")(
-                    "$label — $(pass ? "PASS" : "FAIL (exit $(result.exit_code))")$ts_label"
-                ),
+                h.div(class="mwe-panel-header $(d.pass ? "mwe-pass" : "mwe-fail")")(d.text),
                 h.pre(_html_escape(result.output)),
             )
         end
