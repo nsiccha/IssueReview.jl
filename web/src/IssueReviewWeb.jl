@@ -440,6 +440,23 @@ function _mwe_done_label(label, result, out_path)
     (; pass, text="$label — $verdict$ts_label")
 end
 
+# Both `main` (when discoverable) and `worktree` dirs in run order, with empty
+# / nothing entries dropped — every MWE route iterates exactly this list.
+function _mwe_run_dirs(worktree)
+    dirs = String[]
+    main_dir = _repo_main_dir(worktree)
+    isnothing(main_dir) || push!(dirs, main_dir)
+    isempty(worktree) || push!(dirs, worktree)
+    dirs
+end
+
+# Extract `owner/repo` from a github issue/PR URL. Used to look up `gh` args.
+function _repo_slug_from_url(url)
+    isempty(url) && return ""
+    m = match(r"github\.com/([^/]+/[^/]+)", url)
+    isnothing(m) ? "" : replace(m.captures[1], r"\.git$" => "")
+end
+
 function status_badge(status)
     h.span(; class="u-badge ir-status-$status")(status)
 end
@@ -921,31 +938,25 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     @post run_mwe(; script="", worktree="", slug="") = begin
-        main_dir = _repo_main_dir(worktree)
-        !isnothing(main_dir) && _mwe_result(script, main_dir)
-        !isempty(worktree) && _mwe_result(script, worktree)
+        for d in _mwe_run_dirs(worktree)
+            _mwe_result(script, d)
+        end
         _rerender_card(slug)
     end
 
     @post rerun_mwe(; script="", worktree="", slug="") = begin
-        main_dir = _repo_main_dir(worktree)
-        for d in [main_dir, worktree]
-            isnothing(d) && continue
-            isempty(d) && continue
-            p = _mwe_output_path(script, d)
-            open(p, "w") do f; println(f, "# Restarting MWE..."); end
+        for d in _mwe_run_dirs(worktree)
+            open(_mwe_output_path(script, d), "w") do f; println(f, "# Restarting MWE..."); end
+            fetchindex(_skip_pending, _async_issues.mwe, script, d; force=true)
         end
-        !isnothing(main_dir) && fetchindex(_skip_pending, _async_issues.mwe, script, main_dir; force=true)
-        !isempty(worktree) && fetchindex(_skip_pending, _async_issues.mwe, script, worktree; force=true)
         _rerender_card(slug)
     end
 
     @post run_all_mwe(; slug="", worktree="", proposals_path="") = begin
         scripts = _find_mwe_scripts(slug, proposals_path; worktree)
-        for s in scripts
-            main_dir = _repo_main_dir(worktree)
-            !isnothing(main_dir) && _mwe_result(s, main_dir)
-            !isempty(worktree) && _mwe_result(s, worktree)
+        dirs = _mwe_run_dirs(worktree)
+        for s in scripts, d in dirs
+            _mwe_result(s, d)
         end
         _rerender_card(slug)
     end
@@ -1588,8 +1599,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
             push!(lines, "")
             # Find the last commit containing mwe/ and link to it
             mwe_commit = strip(read(pipeline(ignorestatus(setenv(Cmd(["git", "log", "--all", "--format=%H", "-1", "--", "mwe/"]); dir=worktree)); stderr=devnull), String))
-            repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
-            mwe_repo = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
+            mwe_repo = _repo_slug_from_url(issue)
             mwe_link = !isempty(mwe_commit) && !isempty(mwe_repo) ?
                 "[commit with MWE](https://github.com/$mwe_repo/commit/$mwe_commit)" :
                 "the penultimate commit"
@@ -1650,10 +1660,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
 
         pr_title = _generate_pr_title(p)
         claude_body = _generate_pr_body_claude(p)
-
-        repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
-        repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
-
+        repo_slug = _repo_slug_from_url(issue)
         branch = _worktree_branch(worktree)
 
         action_label = is_update ? "Update PR Description" : "Create Draft PR"
@@ -1777,8 +1784,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         worktree = get(p.yaml, "worktree", "")
         isempty(worktree) && return h.p("No worktree for $slug")
         issue = get(p.yaml, "issue", "")
-        repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
-        repo_slug = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
+        repo_slug = _repo_slug_from_url(issue)
         branch = _worktree_branch(worktree)
         result = _push_with_mwe_cleanup(worktree, branch; repo_slug)
         add_comment!(p.path, isempty(result.result_msg) ? "Pushed branch $branch" : result.result_msg)
