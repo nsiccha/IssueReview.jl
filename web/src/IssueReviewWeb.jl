@@ -390,6 +390,24 @@ function _worktree_branch(worktree)
     strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
 end
 
+# Locate `<repo>/proposals/<slug>/proposal.md` across all known repo dirs.
+function find_proposal(slug)
+    for rd in repo_dirs()
+        path = joinpath(rd, "proposals", slug, "proposal.md")
+        isfile(path) && return path
+    end
+    nothing
+end
+
+# Locate + parse in one step. Returns `nothing` when the slug doesn't resolve.
+function load_proposal(slug)
+    path = find_proposal(slug)
+    isnothing(path) ? nothing : parse_proposal(path)
+end
+
+# Tiny 404 widget used by every route that takes a `slug`.
+not_found_node(slug) = h.p("Not found: $slug")
+
 function status_badge(status)
     h.span(; class="u-badge ir-status-$status")(status)
 end
@@ -902,9 +920,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     _rerender_card(slug) = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
-        _render_proposal(parse_proposal(path))
+        p = load_proposal(slug)
+        isnothing(p) ? not_found_node(slug) : _render_proposal(p)
     end
 
     @post run_mwe(; script="", worktree="", slug="") = begin
@@ -1386,9 +1403,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     @get proposal(slug) = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
-        p = parse_proposal(path)
+        p = load_proposal(slug)
+        isnothing(p) && return not_found_node(slug)
         # Evict caches so we get fresh data
         issue = get(p.yaml, "issue", "")
         pr_val = _yaml_pr(p.yaml)
@@ -1539,18 +1555,9 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
 
     # --- Action endpoints ---
 
-    _find_proposal(slug) = begin
-        for rd in repo_dirs()
-            path = joinpath(rd, "proposals", slug, "proposal.md")
-            isfile(path) && return path
-        end
-        nothing
-    end
-
     @post refresh_card(slug) = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
-        p = parse_proposal(path)
+        p = load_proposal(slug)
+        isnothing(p) && return not_found_node(slug)
         issue = get(p.yaml, "issue", "")
         pr_val = _yaml_pr(p.yaml)
         worktree = get(p.yaml, "worktree", "")
@@ -1563,8 +1570,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     _do_respond(slug, new_status, msg, _filter) = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
+        path = find_proposal(slug)
+        isnothing(path) && return not_found_node(slug)
         update_yaml!(path, "status", new_status)
         !isempty(msg) && add_comment!(path, msg)
         _render_list(_filter)
@@ -1573,8 +1580,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     @post respond(slug, new_status; msg="", _filter="all") = _do_respond(slug, new_status, msg, _filter)
 
     @post add_comment(slug; msg="", _filter="all") = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
+        path = find_proposal(slug)
+        isnothing(path) && return not_found_node(slug)
         !isempty(msg) && add_comment!(path, msg)
         _render_list(_filter)
     end
@@ -1651,9 +1658,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
 
     @get pr_form(slug) = begin
         @info "PR_FORM GET" slug
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
-        p = parse_proposal(path)
+        p = load_proposal(slug)
+        isnothing(p) && return not_found_node(slug)
         worktree = get(p.yaml, "worktree", "")
         issue = get(p.yaml, "issue", "")
         existing_pr = _yaml_pr(p.yaml)
@@ -1700,9 +1706,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     @get pr_preview(slug) = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
-        p = parse_proposal(path)
+        p = load_proposal(slug)
+        isnothing(p) && return not_found_node(slug)
         worktree = get(p.yaml, "worktree", "")
         issue = get(p.yaml, "issue", "")
         existing_pr = _yaml_pr(p.yaml)
@@ -1838,9 +1843,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     @post push_branch(slug; _filter="all") = begin
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
-        p = parse_proposal(path)
+        p = load_proposal(slug)
+        isnothing(p) && return not_found_node(slug)
         worktree = get(p.yaml, "worktree", "")
         isempty(worktree) && return h.p("No worktree for $slug")
         issue = get(p.yaml, "issue", "")
@@ -1848,18 +1852,14 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         repo_slug = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
         branch = _worktree_branch(worktree)
         result = _push_with_mwe_cleanup(worktree, branch; repo_slug)
-        if isempty(result.result_msg)
-            add_comment!(path, "Pushed branch $branch")
-        else
-            add_comment!(path, result.result_msg)
-        end
+        add_comment!(p.path, isempty(result.result_msg) ? "Pushed branch $branch" : result.result_msg)
         _render_list(_filter)
     end
 
     @post create_pr(slug; pr_title="", human_comment="", claude_body="", repo_slug="", worktree="", branch="", existing_pr="") = begin
         @info "CREATE_PR" slug pr_title existing_pr repo_slug branch worktree length(claude_body)
-        path = _find_proposal(slug)
-        isnothing(path) && return h.p("Not found: $slug")
+        path = find_proposal(slug)
+        isnothing(path) && return not_found_node(slug)
         is_update = !isempty(existing_pr)
         @info "CREATE_PR" is_update path
 
