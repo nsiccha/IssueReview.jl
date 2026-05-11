@@ -408,6 +408,16 @@ end
 # Tiny 404 widget used by every route that takes a `slug`.
 not_found_node(slug) = h.p("Not found: $slug")
 
+# Status buckets used to decide whether MWE/diff `<details>` panels default to open.
+const _CLOSED_STATUSES = ("rejected", "skipped", "pr-merged")
+should_auto_open(status) = status ∉ _CLOSED_STATUSES
+
+# Standard "loading + poll-this-URL every 2s" placeholder span used by every
+# async cache route (issue discussion, worktree diff, MWE stream...).
+loading_span(label, poll_url; cls="issue-loading", interval="every 2s") = h.span(;
+    class=cls, hx_get=poll_url, hx_trigger=interval, hx_swap="outerHTML",
+)(label)
+
 function status_badge(status)
     h.span(; class="u-badge ir-status-$status")(status)
 end
@@ -739,11 +749,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         data = _issue_discussion(issue_url)
         if isnothing(data)
             h.div(class="issue-discussion")(
-                h.span(; class="issue-loading",
-                    hx_get=@query_url(issue_discussion(; url=issue_url)),
-                    hx_trigger="every 2s",
-                    hx_swap="outerHTML",
-                )("Loading issue discussion..."),
+                loading_span("Loading issue discussion...", @query_url(issue_discussion(; url=issue_url))),
             )
         else
             h.div(class="issue-discussion")(_render_issue_data(data))
@@ -754,11 +760,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         isempty(url) && return h.span()("No issue URL")
         data = _issue_discussion(url)
         if isnothing(data)
-            h.span(; class="issue-loading",
-                hx_get=@query_url(issue_discussion(; url)),
-                hx_trigger="every 2s",
-                hx_swap="outerHTML",
-            )("Loading issue discussion...")
+            loading_span("Loading issue discussion...", @query_url(issue_discussion(; url)))
         else
             h.div(class="issue-discussion")(_render_issue_data(data))
         end
@@ -770,11 +772,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         fetchindex(_skip_pending, _async_issues.discussion, url; force=true)
         # Return loading state — polling will pick up the result
         h.div(class="issue-discussion")(
-            h.span(; class="issue-loading",
-                hx_get=@query_url(issue_discussion(; url)),
-                hx_trigger="every 2s",
-                hx_swap="outerHTML",
-            )("Refreshing..."),
+            loading_span("Refreshing...", @query_url(issue_discussion(; url))),
         )
     end
 
@@ -905,8 +903,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
             !isnothing(r1) || !isnothing(r2)
         end
 
-        closed_statuses = ("rejected", "skipped", "pr-merged")
-        should_open = status ∉ closed_statuses
+        should_open = should_auto_open(status)
         mwe_details = should_open ? h.details(class="mwe-section"; open="") : h.details(class="mwe-section")
         mwe_details(
             h.summary("MWE ($(length(scripts)) script$(length(scripts) == 1 ? "" : "s"))"),
@@ -968,15 +965,10 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
             fetchindex(_skip_pending, _async_issues.diff, worktree; force=true)
             diff_text = nothing  # show loading state
         end
-        closed_statuses = ("rejected", "skipped", "pr-merged")
-        should_open = status ∉ closed_statuses
+        should_open = should_auto_open(status)
         if isnothing(diff_text)
             h.div(class="diff-viewer")(
-                h.span(; class="issue-loading",
-                    hx_get=@query_url(worktree_diff(; path=worktree)),
-                    hx_trigger="every 2s",
-                    hx_swap="outerHTML",
-                )("Loading diff..."),
+                loading_span("Loading diff...", @query_url(worktree_diff(; path=worktree))),
             )
         else
             nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
@@ -1010,11 +1002,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
             # Initial load: use async cache
             diff_text = _worktree_diff(path)
             if isnothing(diff_text)
-                h.span(; class="issue-loading",
-                    hx_get=@query_url(worktree_diff(; path)),
-                    hx_trigger="every 2s",
-                    hx_swap="outerHTML",
-                )("Loading diff...")
+                loading_span("Loading diff...", @query_url(worktree_diff(; path)))
             else
                 new_hash = string(hash(diff_text))
                 nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
@@ -1036,11 +1024,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         isempty(path) && return h.span()("No path")
         fetchindex(_skip_pending, _async_issues.diff, path; force=true)
         h.div(class="diff-viewer")(
-            h.span(; class="issue-loading",
-                hx_get=@query_url(worktree_diff(; path)),
-                hx_trigger="every 2s",
-                hx_swap="outerHTML",
-            )("Refreshing diff..."),
+            loading_span("Refreshing diff...", @query_url(worktree_diff(; path))),
         )
     end
 
