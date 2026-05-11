@@ -748,17 +748,13 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     .ir-pr-form-h3 { margin: 0; }
     .ir-pr-form-existing { font-size: 0.85rem; color: #666; margin-bottom: 0.5rem; }
     .ir-pr-form-meta { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
-    .ir-pr-form-meta-lg { font-size: 0.85rem; color: #666; }
     .ir-pr-form-label { font-size: 0.85rem; font-weight: 600; }
     .ir-pr-form-hint { font-weight: 400; color: #888; }
     .ir-pr-form-input { width: 100%; padding: 0.3rem; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; margin: 0.3rem 0 0.75rem; }
-    .ir-pr-form-input-lg { width: 100%; padding: 0.4rem; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 0.75rem; }
     .ir-pr-form-textarea { width: 100%; padding: 0.3rem; font-family: inherit; font-size: 0.85rem; border: 1px solid #ccc; border-radius: 4px; margin: 0.3rem 0 0.75rem; }
-    .ir-pr-form-textarea-lg { width: 100%; padding: 0.5rem; font-family: inherit; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 0.75rem; }
     .ir-pr-form-mb { margin-bottom: 0.75rem; }
     .ir-pr-form-actions { display: flex; gap: 0.5rem; }
     .ir-pr-preview-pre { border: 1px solid #d0d7de; border-radius: 4px; padding: 0.75rem; background: #fafbfc; margin-top: 0.3rem; font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; }
-    .ir-pr-preview-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 1rem; background: #fafbfc; margin-bottom: 1rem; }
     .ir-banner-msg { font-size: 0.9rem; margin: 0; }
     .ir-banner-msg.ir-banner-msg-success { color: #1a7f37; }
     .ir-banner-msg.ir-banner-msg-error { color: #cf222e; }
@@ -1690,60 +1686,6 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
                 ),
             ),
         )
-    end
-
-    @get pr_preview(slug) = begin
-        p = load_proposal(slug)
-        isnothing(p) && return not_found_node(slug)
-        worktree = get(p.yaml, "worktree", "")
-        issue = get(p.yaml, "issue", "")
-        existing_pr = _yaml_pr(p.yaml)
-        is_update = !isnothing(existing_pr)
-
-        pr_title = _generate_pr_title(p)
-        claude_body = _generate_pr_body_claude(p)
-
-        # Detect repo for gh command
-        repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
-        repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
-
-        # Detect branch name from worktree
-        branch = _worktree_branch(worktree)
-
-        action_label = is_update ? "Update PR Description" : "Create Draft PR"
-        heading = is_update ? h.h2("Update PR: ", h.a(; href=existing_pr, target="_blank")(existing_pr)) :
-                              h.h2("Create Draft PR: ", h.code(slug))
-
-        content = h.div()(
-            h.div(class="nav-links")(
-                h.a(; href="/", hx_get="/", hx_target="body", hx_push_url="/")("← Back to reviews"),
-            ),
-            heading,
-            !isempty(repo_slug) ? h.p(; class="ir-pr-form-meta-lg")("Repo: ", h.code(repo_slug), !isempty(branch) ? h.span()(" | Branch: ", h.code(branch)) : "") : "",
-            h.div(class="config-section")(
-                h.h3("PR Title"),
-                h.form(; hx_post="/create_pr/$slug", hx_target="body", hx_swap="innerHTML")(
-                    h.input(; type="text", name="pr_title", value=pr_title, class="ir-pr-form-input-lg"),
-                    h.h3("Your comment ", h.small(; class="ir-pr-form-hint")("(appears at the top of the PR body)")),
-                    h.textarea(; name="human_comment", rows="4", class="ir-pr-form-textarea-lg",
-                        placeholder="Optional: add context, notes for reviewers...")("I'll check the changes before marking it as ready for review."),
-                    h.h3("Auto-generated content ", h.small(; class="ir-pr-form-hint")("(preview — appears below the divider)")),
-                    h.div(; class="ir-pr-preview-card")(
-                        h.div(class="proposal-body")(Markdown.html(Markdown.parse(claude_body))),
-                    ),
-                    h.textarea(; name="claude_body", class="u-hidden")(_html_escape(claude_body)),
-                    h.input(; type="hidden", name="repo_slug", value=repo_slug),
-                    h.input(; type="hidden", name="worktree", value=worktree),
-                    h.input(; type="hidden", name="branch", value=branch),
-                    h.input(; type="hidden", name="existing_pr", value=isnothing(existing_pr) ? "" : existing_pr),
-                    h.div(; class="ir-pr-form-actions")(
-                        h.button(; class="btn btn-approve", type="submit")(action_label),
-                        h.a(; href="/", class="btn")("Cancel"),
-                    ),
-                ),
-            ),
-        )
-        content
     end
 
     _build_pr_body(human_comment, claude_body) = begin
