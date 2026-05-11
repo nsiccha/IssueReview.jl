@@ -347,24 +347,25 @@ function _write_frontmatter!(path, yaml, body)
     write(path, "---\n" * String(take!(buf)) * "---\n" * body)
 end
 
-function update_yaml!(path, key, value)
+# Load frontmatter+body from a proposal path, apply `f(yaml)` in place, then
+# write back. `caller` is used in the error message when the file has no
+# frontmatter to mutate.
+function _mutate_frontmatter!(f, path, caller)
     content = read(path, String)
     yaml_str, body = _split_frontmatter(content)
-    isnothing(yaml_str) && throw(ArgumentError("update_yaml!: no YAML frontmatter in $path"))
+    isnothing(yaml_str) && throw(ArgumentError("$caller: no YAML frontmatter in $path"))
     yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
-    yaml[key] = value
+    f(yaml)
     _write_frontmatter!(path, yaml, body)
 end
 
-function add_comment!(path, comment)
-    content = read(path, String)
-    yaml_str, body = _split_frontmatter(content)
-    isnothing(yaml_str) && throw(ArgumentError("add_comment!: no YAML frontmatter in $path"))
-    yaml = YAML.load(yaml_str; dicttype=OrderedDict{String,Any})
+update_yaml!(path, key, value) = _mutate_frontmatter!(path, "update_yaml!") do yaml
+    yaml[key] = value
+end
+
+add_comment!(path, comment) = _mutate_frontmatter!(path, "add_comment!") do yaml
     timestamp = Dates.format(now(), "yyyy-mm-dd HH:MM")
-    comments = get!(yaml, "comments", String[])
-    push!(comments, "[$timestamp] $comment")
-    _write_frontmatter!(path, yaml, body)
+    push!(get!(yaml, "comments", String[]), "[$timestamp] $comment")
 end
 
 function parse_comments(yaml)
