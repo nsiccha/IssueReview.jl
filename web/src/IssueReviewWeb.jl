@@ -373,6 +373,23 @@ function parse_comments(yaml)
     [string(c) for c in comments]
 end
 
+# YAML null / empty-string scalars come back from YAML.jl in a few shapes
+# (`nothing`, the literal string `"null"`, or `""`). Normalize to either the
+# stripped string or `nothing`.
+function _parse_pr_val(v)
+    isnothing(v) && return nothing
+    v in ("null", "") ? nothing : v
+end
+_yaml_pr(yaml) = _parse_pr_val(get(yaml, "pr", ""))
+
+# Resolve the current branch in a worktree dir, returning "" if not a git dir.
+function _worktree_branch(worktree)
+    isempty(worktree) && return ""
+    isdir(worktree) || return ""
+    ispath(joinpath(worktree, ".git")) || return ""
+    strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
+end
+
 function status_badge(status)
     h.span(; class="u-badge ir-status-$status")(status)
 end
@@ -1050,10 +1067,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     _render_proposal(p) = begin
         slug = basename(dirname(p.path))
         yaml_status = get(p.yaml, "status", "review")
-        pr_val = get(p.yaml, "pr", "")
-        pr_val_parsed = pr_val in ("null", "") ? nothing : pr_val
-        status = _effective_status(yaml_status, pr_val_parsed)
-        pr = pr_val_parsed
+        pr = _yaml_pr(p.yaml)
+        status = _effective_status(yaml_status, pr)
         issue = get(p.yaml, "issue", "")
         worktree = get(p.yaml, "worktree", "")
         body_html = Markdown.html(Markdown.parse(p.body))
@@ -1196,11 +1211,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         )
     end
 
-    _proposal_effective_status(p) = begin
-        pr_val = get(p.yaml, "pr", "")
-        pr_parsed = pr_val in ("null", "") ? nothing : pr_val
-        _effective_status(get(p.yaml, "status", "review"), pr_parsed)
-    end
+    _proposal_effective_status(p) = _effective_status(get(p.yaml, "status", "review"), _yaml_pr(p.yaml))
 
     _render_list(filter_val) = begin
         ps = proposals
@@ -1380,8 +1391,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         p = parse_proposal(path)
         # Evict caches so we get fresh data
         issue = get(p.yaml, "issue", "")
-        pr_val = get(p.yaml, "pr", "")
-        pr_val = pr_val in ("null", "") ? nothing : pr_val
+        pr_val = _yaml_pr(p.yaml)
         worktree = get(p.yaml, "worktree", "")
         !isempty(issue) && fetchindex(_skip_pending, _async_issues.discussion, issue; force=true)
         !isnothing(pr_val) && fetchindex(_skip_pending, _async_issues.discussion, pr_val; force=true)
@@ -1542,8 +1552,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         isnothing(path) && return h.p("Not found: $slug")
         p = parse_proposal(path)
         issue = get(p.yaml, "issue", "")
-        pr_val = get(p.yaml, "pr", "")
-        pr_val = pr_val in ("null", "") ? nothing : pr_val
+        pr_val = _yaml_pr(p.yaml)
         worktree = get(p.yaml, "worktree", "")
         # Evict all caches for this card
         !isempty(issue) && fetchindex(_skip_pending, _async_issues.discussion, issue; force=true)
@@ -1630,8 +1639,8 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         slug = basename(dirname(p.path))
         issue_num = match(r"^(\d+)", slug)
         # Prefer title from YAML front matter
-        title = get(p.yaml, "title", nothing)
-        if isnothing(title) || title in ("null", "")
+        title = _parse_pr_val(get(p.yaml, "title", nothing))
+        if isnothing(title)
             # Fallback: humanize slug
             name_part = isnothing(issue_num) ? slug : replace(slug, r"^\d+-?" => "")
             title = replace(name_part, "-" => " ", "_" => " ")
@@ -1647,8 +1656,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         p = parse_proposal(path)
         worktree = get(p.yaml, "worktree", "")
         issue = get(p.yaml, "issue", "")
-        existing_pr = get(p.yaml, "pr", "")
-        existing_pr = existing_pr in ("null", "") ? nothing : existing_pr
+        existing_pr = _yaml_pr(p.yaml)
         is_update = !isnothing(existing_pr)
 
         pr_title = _generate_pr_title(p)
@@ -1657,10 +1665,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
         repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
 
-        branch = ""
-        if !isempty(worktree) && isdir(worktree) && ispath(joinpath(worktree, ".git"))
-            branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
-        end
+        branch = _worktree_branch(worktree)
 
         action_label = is_update ? "Update PR Description" : "Create Draft PR"
 
@@ -1700,8 +1705,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         p = parse_proposal(path)
         worktree = get(p.yaml, "worktree", "")
         issue = get(p.yaml, "issue", "")
-        existing_pr = get(p.yaml, "pr", "")
-        existing_pr = existing_pr in ("null", "") ? nothing : existing_pr
+        existing_pr = _yaml_pr(p.yaml)
         is_update = !isnothing(existing_pr)
 
         pr_title = _generate_pr_title(p)
@@ -1712,10 +1716,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         repo_slug = isnothing(repo_m) ? "" : repo_m.captures[1]
 
         # Detect branch name from worktree
-        branch = ""
-        if !isempty(worktree) && isdir(worktree) && ispath(joinpath(worktree, ".git"))
-            branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
-        end
+        branch = _worktree_branch(worktree)
 
         action_label = is_update ? "Update PR Description" : "Create Draft PR"
         heading = is_update ? h.h2("Update PR: ", h.a(; href=existing_pr, target="_blank")(existing_pr)) :
@@ -1845,7 +1846,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         issue = get(p.yaml, "issue", "")
         repo_m = match(r"github\.com/([^/]+/[^/]+)", issue)
         repo_slug = isnothing(repo_m) ? "" : replace(repo_m.captures[1], r"\.git$" => "")
-        branch = strip(read(setenv(`git rev-parse --abbrev-ref HEAD`; dir=worktree), String))
+        branch = _worktree_branch(worktree)
         result = _push_with_mwe_cleanup(worktree, branch; repo_slug)
         if isempty(result.result_msg)
             add_comment!(path, "Pushed branch $branch")
