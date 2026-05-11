@@ -317,18 +317,26 @@ function parse_proposal(path)
     (; yaml, body, raw=content, path)
 end
 
-function list_proposals()
+# Walk all proposal.md files across all repo dirs. When `include_meta` is true,
+# directories whose names start with `_` (triage dirs etc.) are included; the
+# list-page renderer filters them out, the hash sentinel does not.
+function _proposal_paths(; include_meta=false)
     files = String[]
     for rd in repo_dirs()
         pdir = joinpath(rd, "proposals")
         isdir(pdir) || continue
         for d in readdir(pdir; join=true)
             isdir(d) || continue
-            startswith(basename(d), "_") && continue
+            (!include_meta && startswith(basename(d), "_")) && continue
             pf = joinpath(d, "proposal.md")
             isfile(pf) && push!(files, pf)
         end
     end
+    files
+end
+
+function list_proposals()
+    files = _proposal_paths()
     sort!(files; by=mtime, rev=true)
     [parse_proposal(f) for f in files]
 end
@@ -1443,17 +1451,7 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
     end
 
     _proposals_hash = begin
-        files = String[]
-        for rd in repo_dirs()
-            pdir = joinpath(rd, "proposals")
-            isdir(pdir) || continue
-            for d in readdir(pdir; join=true)
-                isdir(d) || continue
-                pf = joinpath(d, "proposal.md")
-                isfile(pf) && push!(files, pf)
-            end
-        end
-        sort!(files)
+        files = sort!(_proposal_paths(; include_meta=true))
         parts = [string(f, ":", filesize(f), ":", mtime(f)) for f in files]
         string(hash(join(parts, "|")))
     end
