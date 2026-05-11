@@ -968,6 +968,29 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         _rerender_card(slug)
     end
 
+    # Build the <details><summary>Diff (N files)</summary>...</details> block
+    # used by both _render_diff and the worktree_diff polling route.
+    _diff_details_node(diff_text; open=true) = begin
+        nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
+        details = open ? h.details(class="diff-viewer"; open="") : h.details(class="diff-viewer")
+        details(
+            h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
+            render_diff_html(diff_text),
+        )
+    end
+
+    # Wrap a (just-rendered) diff in the polling envelope; the wrapper re-polls
+    # `/worktree_diff?path=...&current_hash=...` every 10s and HTMX-swaps when
+    # the hash changes.
+    _diff_poll_wrapper(path, diff_text) = begin
+        new_hash = string(hash(diff_text))
+        h.div(; class="diff-poll-wrapper",
+            hx_get=@query_url(worktree_diff(; path, current_hash=new_hash)),
+            hx_trigger="every 10s",
+            hx_swap="outerHTML",
+        )(_diff_details_node(diff_text))
+    end
+
     _render_diff(worktree, status="review") = begin
         diff_text = _worktree_diff(worktree)
         # Auto-refresh stale diffs (cached from old code or empty)
@@ -975,18 +998,12 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
             fetchindex(_skip_pending, _async_issues.diff, worktree; force=true)
             diff_text = nothing  # show loading state
         end
-        should_open = should_auto_open(status)
         if isnothing(diff_text)
             h.div(class="diff-viewer")(
                 loading_span("Loading diff...", @query_url(worktree_diff(; path=worktree))),
             )
         else
-            nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
-            diff_details = should_open ? h.details(class="diff-viewer"; open="") : h.details(class="diff-viewer")
-            diff_details(
-                h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
-                render_diff_html(diff_text),
-            )
+            _diff_details_node(diff_text; open=should_auto_open(status))
         end
     end
 
@@ -995,38 +1012,14 @@ _pr_state_cache = Dict{String, Tuple{Float64, String}}()  # url => (timestamp, s
         if !isempty(current_hash)
             # Polling: fetch fresh diff directly (fast, ~10ms) and compare
             diff_text = _fetch_worktree_diff(path)
-            new_hash = string(hash(diff_text))
-            current_hash == new_hash && return HTTP.Response(204, [])
-            nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
-            h.div(; class="diff-poll-wrapper",
-                hx_get=@query_url(worktree_diff(; path, current_hash=new_hash)),
-                hx_trigger="every 10s",
-                hx_swap="outerHTML",
-            )(
-                h.details(class="diff-viewer"; open="")(
-                    h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
-                    render_diff_html(diff_text),
-                ),
-            )
+            string(hash(diff_text)) == current_hash && return HTTP.Response(204, [])
+            _diff_poll_wrapper(path, diff_text)
         else
             # Initial load: use async cache
             diff_text = _worktree_diff(path)
-            if isnothing(diff_text)
-                loading_span("Loading diff...", @query_url(worktree_diff(; path)))
-            else
-                new_hash = string(hash(diff_text))
-                nfiles = count(l -> startswith(l, "diff --git"), eachline(IOBuffer(diff_text)))
-                h.div(; class="diff-poll-wrapper",
-                    hx_get=@query_url(worktree_diff(; path, current_hash=new_hash)),
-                    hx_trigger="every 10s",
-                    hx_swap="outerHTML",
-                )(
-                    h.details(class="diff-viewer"; open="")(
-                        h.summary("Diff ($nfiles file$(nfiles == 1 ? "" : "s"))"),
-                        render_diff_html(diff_text),
-                    ),
-                )
-            end
+            isnothing(diff_text) ?
+                loading_span("Loading diff...", @query_url(worktree_diff(; path))) :
+                _diff_poll_wrapper(path, diff_text)
         end
     end
 
